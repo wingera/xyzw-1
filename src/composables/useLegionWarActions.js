@@ -1,5 +1,6 @@
 import { ref } from "vue";
 
+import { buildLegionWarWsUrl } from "@/services/legionWar/legionWarWsUrl";
 import { getCurrentTimeByFormat } from "@/utils/DateTimeUtils";
 import { XyzwLegionWarWebSocketClient } from "@/utils/xyzwLegionWarWebSocket";
 
@@ -67,13 +68,23 @@ export function useLegionWarActions({
 
     const battleFieldId = battlefieldResp?.info?.battlefieldId;
     const sid = battlefieldResp?.info?.sid;
-    const baseWsUrl
-      = "wss://xxz-xyzw-new.hortorgames.com/agent"
-        + `?p=${encodeURIComponent(tokenStore.selectedToken.token)}&e=x&sid2=${sid}&lang=chinese&sid2=${sid}`;
+    let wsUrl;
+    try {
+      ({ wsUrl } = buildLegionWarWsUrl({
+        tokenString: tokenStore.selectedToken.token,
+        sid,
+        parseBase64Token: tokenStore.parseBase64Token,
+        validateToken: tokenStore.validateToken,
+      }));
+    } catch (error) {
+      console.error("构建 LegionWar WebSocket URL 失败:", error);
+      message.error(String(error?.message || "战场连接参数无效"));
+      return;
+    }
 
     hint.value = battleFieldId;
     legionWarWebSocket.value = new XyzwLegionWarWebSocketClient({
-      url: baseWsUrl,
+      url: wsUrl,
       utils: null,
       hint: hint.value,
       heartbeatMs: 5000,

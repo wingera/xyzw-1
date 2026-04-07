@@ -7,6 +7,19 @@ export const RolePlugin = ({
   onSome,
   $emit,
 }: EVM) => {
+  onSome(["fight_startlevelresp"], (data: XyzwSession) => {
+    const tokenStore = useTokenStore();
+    const version = Number(data?.body?.battleData?.version || 0) || null;
+    if (version) {
+      tokenStore.setBattleVersion(version);
+    }
+    gameLogger.verbose(`收到战斗版本响应: ${data.tokenId}`, data.body);
+  });
+
+  onSome(["activity_totalrewardnotify"], (data: XyzwSession) => {
+    gameLogger.verbose(`收到活动奖励通知: ${data.tokenId}`, data.body);
+  });
+
   onSome(["role_getroleinforesp", "role_getroleinfo"], (data: XyzwSession) => {
     gameLogger.verbose(`收到角色信息事件: ${data.tokenId}`, data);
     const { body, tokenId } = data;

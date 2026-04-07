@@ -41,6 +41,15 @@ export const TeamPlugin = ({
       "presetteam_setteamresp",
       "presetteam_saveteam",
       "presetteam_saveteamresp",
+      "hero_gointobattleresp",
+      "hero_gobackbattleresp",
+      "hero_exchangeresp",
+      "artifact_loadresp",
+      "artifact_unloadresp",
+      "pearl_unloadskillresp",
+      "pearl_replaceskillresp",
+      "pearl_exchangeskillresp",
+      "lordweapon_changedefaultweaponresp",
     ],
     (data: XyzwSession) => {
       gameLogger.verbose(`收到队伍信息事件: ${data.tokenId}`, data);

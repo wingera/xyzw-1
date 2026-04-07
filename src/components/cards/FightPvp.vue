@@ -310,7 +310,6 @@
                       v-if="hero.heroAvate"
                       class="hero-avatar-img"
                       :alt="hero.heroName"
-                      :class="{ 'lusu-avatar-rotate': isLusuHero(hero.heroId) }"
                       :src="hero.heroAvate"
                     >
                     <div v-else class="hero-placeholder">
@@ -472,7 +471,6 @@
             <img
               v-if="heroModealTemp.heroAvate"
               :alt="heroModealTemp.heroName"
-              :class="{ 'lusu-avatar-rotate': isLusuHero(heroModealTemp.heroId) }"
               :src="heroModealTemp.heroAvate"
             >
           </div>
@@ -789,8 +787,6 @@ const options = [
 ];
 loadingText.value = t("fightPvpCard.messages.loadingTarget");
 const player_date = { name: "", power: "" };
-
-const isLusuHero = (heroId) => Number(heroId) === 121;
 
 const getLineupTagColor = (lineupType) => {
   const rule = LINEUP_RULES.find((item) => item.name === lineupType);
@@ -2702,10 +2698,6 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
-
-.lusu-avatar-rotate {
-  transform: rotate(90deg);
 }
 
 .hero-placeholder {

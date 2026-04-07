@@ -1,4 +1,9 @@
 import api from "@/api";
+import {
+  acquireTokenOperationLock,
+  releaseTokenOperationLock,
+} from "@/services/token/tokenOperationCoordination";
+import { resolveServerActivationBindingForToken } from "@/services/token/tokenActivationBindingResolver";
 
 export function useTaskControlRunner({
   appendLog,
@@ -46,6 +51,45 @@ export function useTaskControlRunner({
     new Promise((resolve) => {
       window.setTimeout(resolve, Math.max(0, Number(ms) || 0));
     });
+
+  const getBusySourceText = (lock) => {
+    if (!lock) {
+      return "其他流程";
+    }
+    if (lock.source === "lineup-apply") {
+      return "阵容应用";
+    }
+    if (lock.source === "task-control") {
+      return "另一个任务控制流程";
+    }
+    return lock.meta?.label || lock.source || "其他流程";
+  };
+
+  const withTaskControlTokenLock = async (row, tokenId, roleName, executor) => {
+    const lockResult = acquireTokenOperationLock(tokenId, "task-control", {
+      taskId: row.id,
+      taskName: row.taskName,
+      title: row.title,
+      roleName,
+      label: `任务控制:${row.title || row.taskName || row.id}`,
+    });
+
+    if (!lockResult.ok) {
+      appendLog(
+        row,
+        `账号 ${roleName} 正在执行${getBusySourceText(lockResult.current)}，本次任务已跳过该账号`,
+        "warning",
+      );
+      return false;
+    }
+
+    try {
+      await executor();
+      return true;
+    } finally {
+      releaseTokenOperationLock(tokenId, lockResult.lock.lockId);
+    }
+  };
 
   const resolveTaskItemText = (row) => {
     if (row.id === "club-store" && row.clubStore) {
@@ -100,30 +144,16 @@ export function useTaskControlRunner({
     return day >= 1 && day <= 3 && hour >= 6;
   };
 
-  const getTokenActivationByTokenId = async () => {
+  const getTokenActivationBindings = async () => {
     const res = await api.tokenActivation.listMine();
     if (!res?.success) {
       throw new Error(res?.message || t("taskControl.messages.activationCheckFailed"));
     }
-    const activationByTokenId = new Map();
-    const list = Array.isArray(res.data) ? res.data : [];
-    list.forEach((item) => {
-      const tokenId = String(item?.tokenId || "").trim();
-      if (!tokenId) {
-        return;
-      }
-      const existing = activationByTokenId.get(tokenId);
-      const existingTs = new Date(existing?.updatedAt || 0).getTime();
-      const currentTs = new Date(item?.updatedAt || 0).getTime();
-      if (!existing || currentTs >= existingTs) {
-        activationByTokenId.set(tokenId, item);
-      }
-    });
-    return activationByTokenId;
+    return Array.isArray(res.data) ? res.data : [];
   };
 
-  const resolveActivatedTokenIds = async (tokenIds) => {
-    const activationMap = await getTokenActivationByTokenId();
+  const resolveActivatedTokenIds = async (tokenIds, tokenRoleIdMap = {}) => {
+    const bindings = await getTokenActivationBindings();
     const activatedTokenIds = [];
     const skippedNames = [];
     const nowTs = Date.now();
@@ -139,8 +169,24 @@ export function useTaskControlRunner({
       const roleId = String(
         token.activationRoleId || token.activationGameAccountId || token.roleId || "",
       ).trim();
+      const fallbackRoleId = String(tokenRoleIdMap?.[token.id] || "").trim();
       const displayName = String(token.name || token.id || roleId || tokenId);
-      const activation = activationMap.get(String(token.id || "").trim());
+      const tokenForBindingMatch = fallbackRoleId
+        ? {
+            ...token,
+            roleId: roleId || fallbackRoleId,
+            activationRoleId:
+              String(token.activationRoleId || "").trim() || fallbackRoleId,
+            activationGameAccountId:
+              String(token.activationGameAccountId || "").trim()
+              || fallbackRoleId,
+          }
+        : token;
+      const activation = resolveServerActivationBindingForToken({
+        token: tokenForBindingMatch,
+        bindings,
+        parseBase64Token: tokenStore.parseBase64Token,
+      });
       const expiresAt = String(
         activation?.expiresAt || token.activationExpiresAt || "",
       ).trim();
@@ -158,12 +204,19 @@ export function useTaskControlRunner({
       const resolvedRoleId = String(
         activation?.roleId
         || activation?.gameAccountId
+        || fallbackRoleId
         || roleId,
       ).trim();
       if (tokenStore.updateToken) {
         tokenStore.updateToken(token.id, {
+          activationSessId:
+            activation?.sessId || token.activationSessId || token.sessId || "",
           activationRoleId: resolvedRoleId || roleId,
           activationGameAccountId: resolvedRoleId || roleId,
+          activationRoleName:
+            activation?.roleName || token.activationRoleName || token.name || "",
+          activationRegion:
+            activation?.region || token.activationRegion || token.server || "",
           activationExpiresAt: expiresAt || null,
           activationBoundAt:
             activation?.boundAt || token.activationBoundAt || null,
@@ -198,7 +251,10 @@ export function useTaskControlRunner({
     }
     let tokenIds = [...originalTokenIds];
     try {
-      const result = await resolveActivatedTokenIds(tokenIds);
+      const result = await resolveActivatedTokenIds(
+        tokenIds,
+        row.tokenRoleIdMap || {},
+      );
       tokenIds = result.activatedTokenIds;
       if (result.skippedNames.length > 0) {
         appendLog(
@@ -262,87 +318,91 @@ export function useTaskControlRunner({
       if (row.id === "daily") {
         for (const tokenId of tokenIds) {
           const roleName = formatRoleNames(resolveRoleNames([tokenId]));
-          appendLog(
-            row,
-            t("taskControl.messages.dailyFlowPreparing", { role: roleName }),
-            "info",
-          );
-          await sleep(500);
-          await runFeature({
-            taskName: row.taskName,
-            tokenIds: [tokenId],
-            taskOptions: {
-              dailyRunner: resolveDailyRunnerSettingsForToken(row, tokenId),
-            },
-            onLog: processLogHandler,
-          });
+          await withTaskControlTokenLock(row, tokenId, roleName, async () => {
+            appendLog(
+              row,
+              t("taskControl.messages.dailyFlowPreparing", { role: roleName }),
+              "info",
+            );
+            await sleep(500);
+            await runFeature({
+              taskName: row.taskName,
+              tokenIds: [tokenId],
+              taskOptions: {
+                dailyRunner: resolveDailyRunnerSettingsForToken(row, tokenId),
+              },
+              onLog: processLogHandler,
+            });
 
-          const extraTasks = normalizeDailySelectedTasks(row.dailySelectedTasks);
-          if (extraTasks.length > 0) {
-            for (const taskName of extraTasks) {
-              const opt = dailySelectableOptions.value.find((item) => item.value === taskName);
-              appendLog(
-                row,
-                t("taskControl.messages.extraTaskPreparing", {
-                  task: opt?.label || taskName,
-                  role: roleName,
-                }),
-                "info",
-              );
-              await sleep(500);
-              await runFeature({
-                taskName,
-                tokenIds: [tokenId],
-                onLog: processLogHandler,
-              });
+            const extraTasks = normalizeDailySelectedTasks(row.dailySelectedTasks);
+            if (extraTasks.length > 0) {
+              for (const taskName of extraTasks) {
+                const opt = dailySelectableOptions.value.find((item) => item.value === taskName);
+                appendLog(
+                  row,
+                  t("taskControl.messages.extraTaskPreparing", {
+                    task: opt?.label || taskName,
+                    role: roleName,
+                  }),
+                  "info",
+                );
+                await sleep(500);
+                await runFeature({
+                  taskName,
+                  tokenIds: [tokenId],
+                  onLog: processLogHandler,
+                });
+              }
             }
-          }
+          });
         }
       } else {
         for (const tokenId of tokenIds) {
           const roleName = formatRoleNames(resolveRoleNames([tokenId]));
-          if (isArenaTask) {
+          await withTaskControlTokenLock(row, tokenId, roleName, async () => {
+            if (isArenaTask) {
+              appendLog(
+                row,
+                t("taskControl.messages.arenaRolePreparing", { role: roleName }),
+                "info",
+              );
+            }
             appendLog(
               row,
-              t("taskControl.messages.arenaRolePreparing", { role: roleName }),
+              t("taskControl.messages.taskPreparing", { role: roleName }),
               "info",
             );
-          }
-          appendLog(
-            row,
-            t("taskControl.messages.taskPreparing", { role: roleName }),
-            "info",
-          );
-          await sleep(500);
-          await runFeature({
-            taskName: row.taskName,
-            tokenIds: [tokenId],
-            batchSettingsOverride:
-              row.id === "send-car"
-                ? resolveSmartCarSettingsForToken(row, tokenId)
-                : undefined,
-            taskOptions:
-              row.id === "arena" && row.arenaConfig
-                ? {
-                    arenaMode: row.arenaConfig.mode || "batch",
-                    arenaFightCount: Number(row.arenaConfig.fightCount || 10),
-                    arenaFormation: Math.max(
-                      1,
-                      Math.min(6, Number(row.arenaConfig.arenaFormation || 1)),
-                    ),
-                    arenaSkipLineups: normalizeSkipLineups(
-                      row.arenaConfig.skipLineups,
-                    ),
-                  }
-                : row.id === "club-store" && row.clubStore
-                  ? {
-                      clubStore: {
-                        goodsIds: normalizeClubStoreGoodsIds(row.clubStore.goodsIds),
-                        onlyUnbought: row.clubStore.onlyUnbought !== false,
-                      },
-                    }
+            await sleep(500);
+            await runFeature({
+              taskName: row.taskName,
+              tokenIds: [tokenId],
+              batchSettingsOverride:
+                row.id === "send-car"
+                  ? resolveSmartCarSettingsForToken(row, tokenId)
                   : undefined,
-            onLog: processLogHandler,
+              taskOptions:
+                row.id === "arena" && row.arenaConfig
+                  ? {
+                      arenaMode: row.arenaConfig.mode || "batch",
+                      arenaFightCount: Number(row.arenaConfig.fightCount || 10),
+                      arenaFormation: Math.max(
+                        1,
+                        Math.min(6, Number(row.arenaConfig.arenaFormation || 1)),
+                      ),
+                      arenaSkipLineups: normalizeSkipLineups(
+                        row.arenaConfig.skipLineups,
+                      ),
+                    }
+                  : row.id === "club-store" && row.clubStore
+                    ? {
+                        clubStore: {
+                          goodsIds: normalizeClubStoreGoodsIds(row.clubStore.goodsIds),
+                          onlyUnbought: row.clubStore.onlyUnbought !== false,
+                        },
+                      }
+                    : undefined,
+              onLog: processLogHandler,
+            });
           });
         }
       }

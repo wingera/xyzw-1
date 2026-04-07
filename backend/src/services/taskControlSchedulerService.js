@@ -359,8 +359,41 @@ const resolveExecutableTokenIds = async ({ user, row, allBinTokenIds }) => {
   return normalizeTokenIds([...new Set([...exactMatched, ...fallbackMatched])]);
 };
 
-const resolveTokenActivationForExecution = ({ userId, tokenId, nowTs = Date.now() }) => {
-  const binding = tokenActivationRepository.findByTokenId({ tokenId });
+export const resolveTokenActivationForExecution = async ({
+  user,
+  row,
+  tokenId,
+  nowTs = Date.now(),
+}) => {
+  const userId = String(user?.id || "").trim();
+  let binding = tokenActivationRepository.findByTokenId({ tokenId });
+  if (!binding) {
+    const tokenRoleIdMap =
+      row?.tokenRoleIdMap && typeof row.tokenRoleIdMap === "object"
+        ? row.tokenRoleIdMap
+        : {};
+    let fallbackRoleId = String(tokenRoleIdMap[tokenId] || "").trim();
+
+    if (!fallbackRoleId) {
+      try {
+        const tokenCtx = await getActualTokenByBin({
+          user,
+          tokenId,
+          withContext: true,
+        });
+        fallbackRoleId = String(tokenCtx?.roleId || "").trim();
+      } catch {
+        fallbackRoleId = "";
+      }
+    }
+
+    if (fallbackRoleId) {
+      binding = tokenActivationRepository.findByRoleId({
+        roleId: fallbackRoleId,
+      });
+    }
+  }
+
   if (!binding) {
     return {
       active: false,
@@ -1663,8 +1696,9 @@ const executeTaskRow = async ({ user, row }) => {
   const nowTs = Date.now();
   for (const tokenId of tokenIds) {
     const tokenLabel = resolveTokenLabel(tokenId);
-    const activation = resolveTokenActivationForExecution({
-      userId: user.id,
+    const activation = await resolveTokenActivationForExecution({
+      user,
+      row,
       tokenId,
       nowTs,
     });

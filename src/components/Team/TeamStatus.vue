@@ -106,7 +106,6 @@
                   v-if="hero.avatar"
                   class="hero-avatar"
                   :alt="hero.name"
-                  :class="{ 'lusu-avatar-rotate': isLusuHero(hero.id) }"
                   :src="hero.avatar"
                 >
                 <div v-else class="hero-placeholder">
@@ -142,8 +141,6 @@ const loading = ref(false);
 const switching = ref(false);
 const currentTeam = ref(1);
 const availableTeams = ref([1, 2, 3, 4, 5, 6]);
-
-const isLusuHero = (heroId: number | string) => Number(heroId) === 121;
 
 // —— 角色身份卡相关状态 ——
 // 默认头像列表（当角色头像为空时随机选择）
@@ -786,10 +783,6 @@ watch(() => roleInfo.value, initializeAvatar, { deep: true, immediate: true });
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
-
-.lusu-avatar-rotate {
-  transform: rotate(90deg);
 }
 
 .hero-placeholder {

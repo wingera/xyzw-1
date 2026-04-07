@@ -17,6 +17,90 @@ const pinia = createPinia();
 app.use(pinia);
 app.use(i18n);
 
+const CHUNK_RECOVERY_STORAGE_KEY = "xyzw:chunk-recovery";
+const CHUNK_RECOVERY_COOLDOWN_MS = 15_000;
+
+const isRecoverableChunkLoadError = (error) => {
+  const message = String(error?.message || error || "").toLowerCase();
+  return [
+    "failed to fetch dynamically imported module",
+    "error loading dynamically imported module",
+    "importing a module script failed",
+    "unable to preload css for",
+  ].some(fragment => message.includes(fragment));
+};
+
+const getChunkRecoveryRecord = () => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const raw = window.sessionStorage.getItem(CHUNK_RECOVERY_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const setChunkRecoveryRecord = (record) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.sessionStorage.setItem(
+      CHUNK_RECOVERY_STORAGE_KEY,
+      JSON.stringify(record),
+    );
+  } catch {
+    // ignore sessionStorage write failures
+  }
+};
+
+const clearChunkRecoveryRecord = () => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.sessionStorage.removeItem(CHUNK_RECOVERY_STORAGE_KEY);
+  } catch {
+    // ignore sessionStorage cleanup failures
+  }
+};
+
+const normalizeRecoveryTarget = (targetPath) => {
+  if (typeof window === "undefined") {
+    return "/";
+  }
+  if (typeof targetPath === "string" && targetPath.startsWith("/")) {
+    return targetPath;
+  }
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+};
+
+const recoverFromChunkLoadError = (error, targetPath) => {
+  if (!isRecoverableChunkLoadError(error) || typeof window === "undefined") {
+    return false;
+  }
+
+  const nextTarget = normalizeRecoveryTarget(targetPath);
+  const lastAttempt = getChunkRecoveryRecord();
+  const now = Date.now();
+  const attemptedRecently = lastAttempt
+    && lastAttempt.target === nextTarget
+    && now - Number(lastAttempt.timestamp || 0) < CHUNK_RECOVERY_COOLDOWN_MS;
+
+  if (attemptedRecently) {
+    return false;
+  }
+
+  setChunkRecoveryRecord({
+    target: nextTarget,
+    timestamp: now,
+  });
+  window.location.assign(nextTarget);
+  return true;
+};
+
 const renderBootstrapError = (error) => {
   const root = document.getElementById("app");
   if (!root) {
@@ -267,12 +351,34 @@ const bootstrap = async () => {
   const { initializeThemeState } = useTheme();
   initializeThemeState();
 
+  if (typeof window !== "undefined") {
+    window.addEventListener("vite:preloadError", (event) => {
+      if (recoverFromChunkLoadError(event.payload)) {
+        event.preventDefault();
+      }
+    });
+
+    window.addEventListener("unhandledrejection", (event) => {
+      if (recoverFromChunkLoadError(event.reason)) {
+        event.preventDefault();
+      }
+    });
+  }
+
+  router.onError((error, to) => {
+    if (recoverFromChunkLoadError(error, to?.fullPath)) {
+      return;
+    }
+    console.error("[router] navigation failed:", error);
+  });
+
   await initializeI18n();
   const authStore = useAuthStore();
   await authStore.initializeAuth();
   setupRouterGuards(router);
   app.use(router);
   await router.isReady();
+  clearChunkRecoveryRecord();
   app.mount("#app");
 };
 

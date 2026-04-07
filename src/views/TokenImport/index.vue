@@ -904,7 +904,7 @@ const tokenHeroDescription = computed(() => {
     return `${username} · ${t("tokenImport.header.accountIsolation")}。先导入一个角色，后续再统一做刷新、批量操作和连接管理。`;
   }
 
-  return `${username} · ${t("tokenImport.header.accountIsolation")}。当前页面已经按 PC 与 Mobile 重新整理成摘要 + 文件区 + Token 列表三段式结构，核心导入、刷新、切换和批量操作逻辑保持不变。`;
+  return `${username} · ${t("tokenImport.header.accountIsolation")}`;
 });
 
 const tokenSummaryCards = computed(() => [

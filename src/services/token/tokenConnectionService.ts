@@ -6,6 +6,14 @@ interface LoggerLike {
   wsMessage?: (tokenId: string, cmd: string, incoming: boolean) => void;
 }
 
+const DEBOUNCED_READ_COMMANDS = new Set([
+  "role_getroleinfo",
+  "tower_getinfo",
+  "evotower_getinfo",
+  "presetteam_getinfo",
+  "legion_getinfo",
+]);
+
 const waitForDisconnect = async (client: any) => {
   await new Promise((resolve) => {
     const checkDisconnected = () => {
@@ -96,6 +104,17 @@ export const sendMessageById = ({
       return false;
     }
 
+    if (
+      DEBOUNCED_READ_COMMANDS.has(String(cmd || "").toLowerCase())
+      && typeof client.debounceSend === "function"
+    ) {
+      void client.debounceSend(cmd, params).catch((error: any) => {
+        logger.error(`发送失败 [${tokenId}] ${cmd}:`, error?.message || error);
+      });
+      logger.wsMessage?.(tokenId, cmd, false);
+      return true;
+    }
+
     client.send(cmd, params, options);
     logger.wsMessage?.(tokenId, cmd, false);
     return true;
@@ -126,6 +145,13 @@ export const sendMessageWithPromiseById = async ({
   const client = connection.client;
   if (!client) {
     throw new Error(`WebSocket客户端不存在 [${tokenId}]`);
+  }
+
+  if (
+    DEBOUNCED_READ_COMMANDS.has(String(cmd || "").toLowerCase())
+    && typeof client.debounceSend === "function"
+  ) {
+    return client.debounceSend(cmd, params, timeout);
   }
 
   return client.sendWithPromise(cmd, params, timeout);

@@ -319,6 +319,31 @@ export const userRepository = {
     run(`DELETE FROM users WHERE id = $id`, { $id: id });
   },
 
+  hasBlockingReferralHistory(userId) {
+    const rows = query(
+      `SELECT CASE
+         WHEN EXISTS(
+           SELECT 1
+           FROM referral_profiles
+           WHERE user_id = $userId
+         ) THEN 1
+         WHEN EXISTS(
+           SELECT 1
+           FROM referral_attributions
+           WHERE referrer_user_id = $userId OR referred_user_id = $userId
+         ) THEN 1
+         WHEN EXISTS(
+           SELECT 1
+           FROM referral_conversions
+           WHERE referrer_user_id = $userId OR referred_user_id = $userId
+         ) THEN 1
+         ELSE 0
+       END AS isBlocked`,
+      { $userId: String(userId || "").trim() },
+    );
+    return Number(rows[0]?.isBlocked || 0) === 1;
+  },
+
   deactivateActivePasswordResetCodesByUser(userId) {
     run(
       `UPDATE password_reset_codes

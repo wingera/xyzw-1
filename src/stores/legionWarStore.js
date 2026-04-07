@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { buildLegionWarWsUrl } from "@/services/legionWar/legionWarWsUrl";
 import { useTokenStore } from "@/stores/tokenStore";
 import { XyzwLegionWarWebSocketClient } from "@/utils/xyzwLegionWarWebSocket";
 import { extractValidData } from "@/utils/legionWar";
@@ -78,14 +79,16 @@ export const useLegionWarStore = defineStore("legionWar", () => {
       battlefieldId.value = getbattlefield.info.battlefieldId;
 
       // 2. 构建 WS URL
-      const baseWsUrl = "wss://xxz-xyzw-new.hortorgames.com/agent"
-        + `?p=${encodeURIComponent(tokenStore.selectedToken.token)}`
-        + `&e=x&sid2=${getbattlefield.info.sid}&lang=chinese`
-        + `&sid2=${getbattlefield.info.sid}`;
+      const { wsUrl } = buildLegionWarWsUrl({
+        tokenString: tokenStore.selectedToken.token,
+        sid: getbattlefield.info.sid,
+        parseBase64Token: tokenStore.parseBase64Token,
+        validateToken: tokenStore.validateToken,
+      });
 
       // 3. 建立连接
       legionWarWebSocket = new XyzwLegionWarWebSocketClient({
-        url: baseWsUrl,
+        url: wsUrl,
         utils: null,
         hint: battlefieldId.value,
         heartbeatMs: 5000,

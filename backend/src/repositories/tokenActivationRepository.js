@@ -147,8 +147,7 @@ export const tokenActivationRepository = {
     if (!normalizedRoleId || !normalizedRegion) {
       return null;
     }
-    const sql = normalizedRoleIndex
-      ? `SELECT
+    const exactSql = `SELECT
          id,
          token_id as tokenId,
          game_account_id as roleId,
@@ -171,8 +170,8 @@ export const tokenActivationRepository = {
          AND region = $region
          AND role_index = $roleIndex
        ORDER BY datetime(updated_at) DESC
-       LIMIT 1`
-      : `SELECT
+       LIMIT 1`;
+    const fallbackSql = `SELECT
          id,
          token_id as tokenId,
          game_account_id as roleId,
@@ -195,14 +194,27 @@ export const tokenActivationRepository = {
          AND region = $region
        ORDER BY datetime(updated_at) DESC
        LIMIT 1`;
-    const rows = query(
-       sql,
-      {
-        $gameAccountId: normalizedRoleId,
-        $region: normalizedRegion,
-        $roleIndex: normalizedRoleIndex,
-      },
-    );
+
+    let rows = [];
+    if (normalizedRoleIndex) {
+      rows = query(
+        exactSql,
+        {
+          $gameAccountId: normalizedRoleId,
+          $region: normalizedRegion,
+          $roleIndex: normalizedRoleIndex,
+        },
+      );
+    }
+    if (!rows[0]) {
+      rows = query(
+        fallbackSql,
+        {
+          $gameAccountId: normalizedRoleId,
+          $region: normalizedRegion,
+        },
+      );
+    }
     return normalizeBinding(rows[0]);
   },
 

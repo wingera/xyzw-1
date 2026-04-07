@@ -94,6 +94,20 @@
           </n-button>
         </div>
         <div class="action-row action-row-sub">
+          <div class="action-item">
+            <span class="item-label">{{ t("arenaPvpCard.actions.preferredWinRate") }}</span>
+            <n-input-number
+              class="action-select"
+              v-model:value="preferredWinRate"
+              :disabled="loading || running"
+              :min="0"
+              :max="100"
+              :precision="0"
+              :step="5"
+              clearable
+              :placeholder="t('arenaPvpCard.placeholders.preferredWinRate')"
+            ></n-input-number>
+          </div>
           <div class="action-item action-item-wide">
             <span class="item-label">{{ t("arenaPvpCard.actions.skipLineups") }}</span>
             <n-select
@@ -381,11 +395,13 @@ import {
   getArenaRecordStorageKey,
   getArenaSkipLineupsStorageKey,
   getArenaStatsStorageKey,
+  loadArenaPreferredWinRateFromLocal,
   getArenaSyncPrefKeyByScope,
   getArenaSyncUserScopeFromStorage,
   loadArenaSkipLineupsFromLocal,
   loadArenaStatsFromLocal,
   loadEncryptedArenaLocalValue,
+  saveArenaPreferredWinRateToLocal,
   saveArenaSkipLineupsToLocal,
   saveArenaStatsToLocal,
   saveEncryptedArenaLocalValue,
@@ -420,6 +436,7 @@ const avatarCandidateIndexMap = ref(new Map());
 const targetWinStats = ref({});
 const manualLineupMap = ref({});
 const skipLineupRules = ref([...DEFAULT_SKIP_LINEUPS]);
+const preferredWinRate = ref(null);
 const manualAssignTargetId = ref("");
 const manualAssignRoleId = ref("");
 const manualAssignLineup = ref("吕赵");
@@ -610,6 +627,14 @@ const toPositiveInteger = (value) => {
   if (!Number.isFinite(numeric) || numeric <= 0)
     return 0;
   return Math.trunc(numeric);
+};
+const normalizePreferredWinRate = (value) => {
+  if (value === null || value === undefined || value === "")
+    return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric))
+    return null;
+  return Math.max(0, Math.min(100, Math.round(numeric)));
 };
 const formatRankLabel = (rank) => {
   const rankValue = toPositiveInteger(rank);
@@ -1148,6 +1173,33 @@ const loadSkipLineups = (tokenId) => {
     skipLineupRules.value = list.length > 0 ? [...new Set(list)] : [...DEFAULT_SKIP_LINEUPS];
   } catch {
     skipLineupRules.value = [...DEFAULT_SKIP_LINEUPS];
+  }
+};
+
+const loadPreferredWinRate = (tokenId) => {
+  if (!tokenId) {
+    preferredWinRate.value = null;
+    return;
+  }
+  try {
+    preferredWinRate.value = normalizePreferredWinRate(
+      loadArenaPreferredWinRateFromLocal(tokenId),
+    );
+  } catch {
+    preferredWinRate.value = null;
+  }
+};
+
+const savePreferredWinRate = (tokenId) => {
+  if (!tokenId)
+    return;
+  try {
+    saveArenaPreferredWinRateToLocal(
+      tokenId,
+      normalizePreferredWinRate(preferredWinRate.value),
+    );
+  } catch {
+    // 忽略本地存储异常
   }
 };
 
@@ -1756,6 +1808,8 @@ const {
   myRoleId,
   rankList,
   targetWinStats,
+  preferredWinRate,
+  arenaRecords,
   arenaTargetProfileCache,
   saveTargetWinStats,
   getLineupType,
@@ -1943,10 +1997,22 @@ watch(
     loadTargetWinStats(tokenId);
     void initArenaPersistForToken(tokenId);
     loadSkipLineups(tokenId);
+    loadPreferredWinRate(tokenId);
     if (isConnected.value)
       refreshArenaData({ silent: true });
   },
 );
+
+watch(preferredWinRate, (value) => {
+  const sanitized = normalizePreferredWinRate(value);
+  if (sanitized !== value) {
+    preferredWinRate.value = sanitized;
+    return;
+  }
+  const tokenId = tokenStore.selectedToken?.id;
+  if (tokenId)
+    savePreferredWinRate(tokenId);
+});
 
 watch(
   () => authStore.isAuthenticated,
@@ -1993,6 +2059,7 @@ onMounted(() => {
   loadTargetWinStats(tokenStore.selectedToken?.id);
   void initArenaPersistForToken(tokenStore.selectedToken?.id);
   loadSkipLineups(tokenStore.selectedToken?.id);
+  loadPreferredWinRate(tokenStore.selectedToken?.id);
   if (isConnected.value) {
     refreshArenaData({ silent: true });
   }

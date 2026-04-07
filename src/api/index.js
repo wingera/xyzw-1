@@ -268,6 +268,13 @@ request.interceptors.response.use(
       const getMessage = (fallback) => extractErrorMessage(data, fallback);
 
       switch (status) {
+        case 400:
+          return Promise.reject(
+            createRequestError(getMessage("请求失败"), {
+              code: data?.error?.code || data?.code || "",
+              status,
+            }),
+          );
         case 401:
           if (
             !skipAuthHandling &&
@@ -316,17 +323,21 @@ request.interceptors.response.use(
           }
           return Promise.reject(
             createRequestError(getMessage("没有权限访问"), {
-              code: data?.error?.code || "AUTH_FORBIDDEN",
+              code: data?.error?.code || data?.code || "AUTH_FORBIDDEN",
+              status,
             }),
           );
         case 404:
           return Promise.reject(
-            createRequestError(getMessage("请求的资源不存在")),
+            createRequestError(getMessage("请求的资源不存在"), {
+              code: data?.error?.code || data?.code || "",
+              status,
+            }),
           );
         case 429:
           return Promise.reject(
             createRequestError(getMessage("请求过于频繁，请稍后重试"), {
-              code: data?.error?.code || "RATE_LIMITED",
+              code: data?.error?.code || data?.code || "RATE_LIMITED",
               retryAfter: Number(data?.retryAfter) || 0,
               status,
             }),
@@ -350,6 +361,13 @@ request.interceptors.response.use(
 
 // API接口定义
 const api = {
+  system: {
+    getVersion: () =>
+      request.get("/version", {
+        skipAuthHandling: true,
+      }),
+  },
+
   // 认证相关
   auth: {
     login: (credentials) => request.post("/auth/login", credentials),
@@ -383,6 +401,17 @@ const api = {
           },
         },
       ),
+  },
+
+  publicReferral: {
+    resolve: (code) =>
+      request.get(`/public/referrals/${encodeURIComponent(code)}`, {
+        skipAuthHandling: true,
+      }),
+    attach: (code) =>
+      request.post(`/public/referrals/${encodeURIComponent(code)}/attach`, {}, {
+        skipAuthHandling: true,
+      }),
   },
 
   // 游戏角色相关
@@ -490,6 +519,11 @@ const api = {
     getCachedSensitiveConfirmToken: (options = {}) => getCachedUserConfirmToken(options),
     getCachedSensitiveConfirmState: (options = {}) => getCachedUserConfirmState(options),
     clearSensitiveConfirmToken: () => clearCachedUserConfirmToken(),
+    getReferralProfile: () => request.get("/user/referral-profile"),
+    generateReferralProfile: () => request.post("/user/referral-profile/generate"),
+    getReferralOverview: () => request.get("/user/referral-overview"),
+    getReferralConversions: (limit = 200) =>
+      request.get(`/user/referral-conversions?limit=${Math.max(1, Number(limit) || 200)}`),
   },
 
   resourceChangeLogs: {
@@ -516,6 +550,17 @@ const api = {
       ),
     create: (payload) => request.post("/feedbacks", payload),
     updateByAdmin: (id, payload) => request.patch(`/feedbacks/${id}`, payload),
+  },
+
+  publicWechat: {
+    list: () =>
+      request.get("/public/wechat-contacts", {
+        skipAuthHandling: true,
+      }),
+    detail: (slug) =>
+      request.get(`/public/wechat-contacts/${encodeURIComponent(slug)}`, {
+        skipAuthHandling: true,
+      }),
   },
 
   notifications: {
@@ -548,6 +593,23 @@ const api = {
         headers: api.admin.adminConfirmHeaders(confirmToken),
       }),
     listUsers: () => request.get("/admin/users"),
+    listReferralAttributions: (limit = 200) =>
+      request.get(`/admin/referrals/attributions?limit=${Math.max(1, Number(limit) || 200)}`),
+    listReferralConversions: (limit = 200) =>
+      request.get(`/admin/referrals/conversions?limit=${Math.max(1, Number(limit) || 200)}`),
+    listWechatContacts: () => request.get("/admin/wechat-contacts"),
+    createWechatContact: (payload, confirmToken = "") =>
+      request.post("/admin/wechat-contacts", payload, {
+        headers: api.admin.adminConfirmHeaders(confirmToken),
+      }),
+    updateWechatContact: (id, payload, confirmToken = "") =>
+      request.put(`/admin/wechat-contacts/${id}`, payload, {
+        headers: api.admin.adminConfirmHeaders(confirmToken),
+      }),
+    deleteWechatContact: (id, confirmToken = "") =>
+      request.delete(`/admin/wechat-contacts/${id}`, {
+        headers: api.admin.adminConfirmHeaders(confirmToken),
+      }),
     listUserTokenActivations: (id) =>
       request.get(`/admin/users/${id}/token-activations`),
     listSecurityEvents: (options = {}) => {
@@ -640,6 +702,14 @@ const api = {
     notifyChangelogToAll: (payload) =>
       request.post("/admin/changelog/notify-all", payload),
     listActivationCodes: () => request.get("/admin/activation-codes"),
+    markReferralConversionPaid: (id, payload = {}, confirmToken = "") =>
+      request.post(`/admin/referrals/conversions/${id}/mark-paid`, payload, {
+        headers: api.admin.adminConfirmHeaders(confirmToken),
+      }),
+    rejectReferralConversion: (id, payload = {}, confirmToken = "") =>
+      request.post(`/admin/referrals/conversions/${id}/reject`, payload, {
+        headers: api.admin.adminConfirmHeaders(confirmToken),
+      }),
     createActivationCodes: (payload, confirmToken = "") =>
       request.post("/admin/activation-codes", payload, {
         headers: api.admin.adminConfirmHeaders(confirmToken),

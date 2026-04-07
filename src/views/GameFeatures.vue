@@ -158,7 +158,7 @@ const selectedTokenDescription = computed(() => {
     return "还没有选中角色，先去 Token 管理页导入并选择角色，再回到这里拉起连接。";
   }
 
-  return `${tokenStore.selectedToken.name} · ${tokenStore.selectedToken.server || "未知服务器"}。当前页面保留原有功能能力，只重新整理 PC / Mobile 的信息层级。`;
+  return `${tokenStore.selectedToken.name} · ${tokenStore.selectedToken.server || "未知服务器"}`;
 });
 
 const summaryCards = computed(() => [
@@ -175,7 +175,7 @@ const summaryCards = computed(() => [
   {
     label: "角色总数",
     value: String(tokenStore.gameTokens.length),
-    meta: "延续现有业务逻辑，仅重排展示与交互壳层",
+    meta: "当前账号已导入角色数量",
   },
   {
     label: "当前建议",

@@ -37,6 +37,16 @@ const adminChildren = [
     }),
   },
   {
+    path: "lineup-assistant",
+    name: "LineupAssistant",
+    component: () => import("@/views/LineupAssistant.vue"),
+    meta: withRouteMeta({
+      title: "阵容助手",
+      requiresAuth: true,
+      layout: "default",
+    }),
+  },
+  {
     path: "legion-war",
     name: "LegionWar",
     component: () => import("@/views/LegionWar.vue"),
@@ -53,6 +63,16 @@ const adminChildren = [
     component: () => import("@/views/Profile.vue"),
     meta: withRouteMeta({
       title: "个人设置",
+      requiresAuth: true,
+      layout: "default",
+    }),
+  },
+  {
+    path: "referral-center",
+    name: "ReferralCenter",
+    component: () => import("@/views/ReferralCenter.vue"),
+    meta: withRouteMeta({
+      title: "推广中心",
       requiresAuth: true,
       layout: "default",
     }),
@@ -159,6 +179,28 @@ const adminChildren = [
     component: () => import("@/views/AdminChangelogBroadcast.vue"),
     meta: withRouteMeta({
       title: "更新日志广播",
+      requiresAuth: true,
+      requiresAdmin: true,
+      layout: "default",
+    }),
+  },
+  {
+    path: "wechat-contacts",
+    name: "AdminWechatContacts",
+    component: () => import("@/views/AdminWechatContacts.vue"),
+    meta: withRouteMeta({
+      title: "微信联系配置",
+      requiresAuth: true,
+      requiresAdmin: true,
+      layout: "default",
+    }),
+  },
+  {
+    path: "referrals",
+    name: "AdminReferrals",
+    component: () => import("@/views/AdminReferrals.vue"),
+    meta: withRouteMeta({
+      title: "推广邀请管理",
       requiresAuth: true,
       requiresAdmin: true,
       layout: "default",

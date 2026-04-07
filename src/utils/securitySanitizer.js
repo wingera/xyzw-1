@@ -2,10 +2,11 @@ const DEFAULT_MASK = "***";
 
 const SENSITIVE_KEY_PATTERN = /(token|authorization|cookie|secret|password|passwd|actualToken|gameToken|userToken)/i;
 const URL_KEY_PATTERN = /(url|uri|endpoint|wsUrl)/i;
-const URL_TOKEN_PARAM_PATTERN = /^(p|token|access_token|auth|authorization|bearer)$/i;
+const WS_URL_SENSITIVE_PARAM_NAMES = "p|sid2|token|access_token|auth|authorization|bearer";
+const URL_TOKEN_PARAM_PATTERN = new RegExp(`^(${WS_URL_SENSITIVE_PARAM_NAMES})$`, "i");
 const SOURCE_URL_SENSITIVE_PARAM_PATTERN = /^(p|token|access_token|auth|authorization|bearer|code|ticket|secret|password|passwd)$/i;
 const ABSOLUTE_URL_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//i;
-const WS_URL_SENSITIVE_PARAM_FALLBACK_PATTERN = /[?&](?:p|token|access_token|auth|authorization|bearer)=/i;
+const WS_URL_SENSITIVE_PARAM_FALLBACK_PATTERN = new RegExp(`[?&](?:${WS_URL_SENSITIVE_PARAM_NAMES})=`, "i");
 const SOURCE_URL_SENSITIVE_PARAM_FALLBACK_PATTERN = /[?&](?:p|token|access_token|auth|authorization|bearer|code|ticket|secret|password|passwd)=/i;
 
 export const maskToken = (raw, startLen = 4, endLen = 4) => {
@@ -25,7 +26,7 @@ const maskBearer = (text) => {
 
 const maskUrlTokenParams = (text) => {
   return String(text || "").replace(
-    /([?&](?:p|token|access_token|auth|authorization|bearer)=)([^&\s]+)/gi,
+    new RegExp(`([?&](?:${WS_URL_SENSITIVE_PARAM_NAMES})=)([^&\\s]+)`, "gi"),
     (_, prefix, value) => `${prefix}${maskToken(value, 3, 3) || DEFAULT_MASK}`,
   );
 };

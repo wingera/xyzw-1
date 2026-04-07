@@ -6,6 +6,9 @@ import { validateRequest } from "../middleware/validate.js";
 import { createPassword, verifyPassword } from "../lib/crypto.js";
 import { validatePasswordStrengthAsync } from "../lib/passwordPolicy.js";
 import { nowIso } from "../db/sql.js";
+import { referralAttributionRepository } from "../repositories/referralAttributionRepository.js";
+import { referralConversionRepository } from "../repositories/referralConversionRepository.js";
+import { referralProfileRepository } from "../repositories/referralProfileRepository.js";
 import { userRepository } from "../repositories/userRepository.js";
 import { refreshTokenRepository } from "../repositories/refreshTokenRepository.js";
 import { securityEventRepository } from "../repositories/securityEventRepository.js";
@@ -20,6 +23,10 @@ import {
   verifyAndConsumeRecoveryCode,
   verifyTotpCode,
 } from "../services/mfaService.js";
+import {
+  buildReferralShareUrl,
+  generateReferralProfileForUser,
+} from "../services/referralService.js";
 
 const updateProfileBodySchema = z.object({
   email: z.union([z.string().trim().email(), z.literal("")]).optional().default(""),
@@ -45,6 +52,9 @@ const confirmPasswordBodySchema = z.object({
 const securityEventsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional().default(50),
   eventType: z.string().trim().max(64).optional().default(""),
+});
+const referralConversionsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional().default(200),
 });
 
 export function createUserRoutes() {
@@ -254,6 +264,72 @@ export function createUserRoutes() {
       },
     });
   });
+
+  router.get("/referral-profile", authRequired, (req, res) => {
+    const profile = referralProfileRepository.findByUserId(req.auth.user.id);
+    if (!profile) {
+      return res.json({
+        success: true,
+        data: null,
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        ...profile,
+        shareUrl: buildReferralShareUrl(profile.referralCode),
+      },
+    });
+  });
+
+  router.post("/referral-profile/generate", authRequired, (req, res) => {
+    const profile = generateReferralProfileForUser(req.auth.user.id);
+    return res.json({
+      success: true,
+      message: "推广链接已准备好",
+      data: profile,
+    });
+  });
+
+  router.get("/referral-overview", authRequired, (req, res) => {
+    const profile = referralProfileRepository.findByUserId(req.auth.user.id);
+    const invitedUsersCount = referralAttributionRepository.countByReferrerUserId(req.auth.user.id);
+    const pendingAmountCents = referralConversionRepository.sumPendingRewardAmountByReferrerUserId(req.auth.user.id);
+    const paidAmountCents = referralConversionRepository.sumPaidRewardAmountByReferrerUserId(req.auth.user.id);
+
+    return res.json({
+      success: true,
+      data: {
+        profile: profile
+          ? {
+              ...profile,
+              shareUrl: buildReferralShareUrl(profile.referralCode),
+            }
+          : null,
+        invitedUsersCount,
+        pendingAmountCents,
+        paidAmountCents,
+      },
+    });
+  });
+
+  router.get(
+    "/referral-conversions",
+    authRequired,
+    validateRequest({ query: referralConversionsQuerySchema }),
+    (req, res) => {
+      const limit = Number(req.query?.limit) || 200;
+      const rows = referralConversionRepository
+        .listByReferrerUserId(req.auth.user.id)
+        .slice(0, limit);
+
+      return res.json({
+        success: true,
+        data: rows,
+      });
+    },
+  );
 
   router.get(
     "/security-events",

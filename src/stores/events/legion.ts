@@ -28,4 +28,8 @@ export const LegionPlugin = ({
   onSome(["legion_applylistresp"], (data: XyzwSession) => {
     gameLogger.debug(`收到俱乐部申请列表响应: ${data.tokenId}`, data.body);
   });
+
+  onSome(["legion_researchresp", "legion_resetresearchresp"], (data: XyzwSession) => {
+    gameLogger.verbose(`收到军团科技响应: ${data.tokenId}`, data.body);
+  });
 };

@@ -10,12 +10,18 @@ import { makeSensitiveAction } from "../middleware/sensitiveAction.js";
 import { nowIso, randomId } from "../db/sql.js";
 import { transaction } from "../db/client.js";
 import { env } from "../config/env.js";
+import {
+  isAllowedActivationDurationMonths,
+  isOneDayActivationDuration,
+  normalizeActivationDurationMonths,
+} from "../lib/activationCodeDuration.js";
 import { countBinFilesForUser } from "../services/binStorageService.js";
 import { validatePasswordStrengthAsync } from "../lib/passwordPolicy.js";
 import { recordAdminAudit } from "../services/adminAuditService.js";
 import { createUserNotification } from "../services/notificationService.js";
 import { inviteCodeRepository } from "../repositories/inviteCodeRepository.js";
 import { activationCodeRepository } from "../repositories/activationCodeRepository.js";
+import { referralConversionRepository } from "../repositories/referralConversionRepository.js";
 import { tokenActivationRepository } from "../repositories/tokenActivationRepository.js";
 import { userRepository } from "../repositories/userRepository.js";
 import { userPreferenceRepository } from "../repositories/userPreferenceRepository.js";
@@ -92,9 +98,10 @@ const createInviteCodesBodySchema = z.object({
 const createActivationCodesBodySchema = z.object({
   count: z.coerce.number().int().min(1).max(100).optional().default(1),
   featureScope: z.enum([ACCESS_SCOPE_FULL, ACCESS_SCOPE_TASK_CONTROL_ONLY]).optional().default(ACCESS_SCOPE_FULL),
-  durationMonths: z.coerce.number().int().refine((value) => [1, 3, 6, 12].includes(value), {
-    message: "durationMonths must be one of 1/3/6/12",
+  durationMonths: z.coerce.number().int().refine((value) => isAllowedActivationDurationMonths(value), {
+    message: "durationMonths must be one of 0/1/3/6/12",
   }),
+  saleAmountCents: z.coerce.number().int().min(0).max(10_000_000).optional().default(0),
 }).strict();
 const adminTaskControlLogsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(2000).optional().default(500),
@@ -162,6 +169,23 @@ const reqMeta = (req) => ({
   ip: String(req.ip || ""),
   userAgent: String(req.headers["user-agent"] || ""),
 });
+
+const USER_DELETE_REFERRAL_BLOCK_CODE = "USER_DELETE_BLOCKED_BY_REFERRAL_HISTORY";
+const USER_DELETE_REFERRAL_BLOCK_MESSAGE = "该用户存在推广归因/返佣历史，不能直接删除；请改为停用或保留账号";
+const isForeignKeyConstraintError = (error) => {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const message = String(error?.message || "").trim();
+  return (
+    code === "SQLITE_CONSTRAINT_FOREIGNKEY"
+    || message.includes("FOREIGN KEY constraint failed")
+  );
+};
+const userDeleteBlockedByReferralHistory = (res) =>
+  res.status(409).json({
+    success: false,
+    code: USER_DELETE_REFERRAL_BLOCK_CODE,
+    message: USER_DELETE_REFERRAL_BLOCK_MESSAGE,
+  });
 
 const resolvePublicAppOrigin = () => env.publicAppOrigin;
 const resolveAdminAppOrigin = () => env.adminAppOrigin || env.publicAppOrigin;
@@ -758,26 +782,38 @@ router.delete(
   sensitiveActionRequired,
   validateRequest({ params: userIdParamSchema }),
   (req, res) => {
-  const target = userRepository.findAdminUserBasic(req.params.id);
+    const target = userRepository.findAdminUserBasic(req.params.id);
 
-  if (!target) {
-    return res.status(404).json({ success: false, message: "用户不存在" });
-  }
+    if (!target) {
+      return res.status(404).json({ success: false, message: "用户不存在" });
+    }
 
-  if (target.id === req.auth.user.id) {
-    return res.status(400).json({ success: false, message: "不能删除当前登录账号" });
-  }
+    if (target.id === req.auth.user.id) {
+      return res.status(400).json({ success: false, message: "不能删除当前登录账号" });
+    }
 
-  userRepository.deleteById(target.id);
-  recordAdminAudit({
-    adminUserId: req.auth.user.id,
-    action: "delete_user",
-    targetType: "user",
-    targetId: target.id,
-    detail: { targetUsername: target.username },
-    ...reqMeta(req),
-  });
-  return res.json({ success: true, message: `已删除账号 ${target.username}` });
+    if (userRepository.hasBlockingReferralHistory(target.id)) {
+      return userDeleteBlockedByReferralHistory(res);
+    }
+
+    try {
+      userRepository.deleteById(target.id);
+    } catch (error) {
+      if (isForeignKeyConstraintError(error)) {
+        return userDeleteBlockedByReferralHistory(res);
+      }
+      throw error;
+    }
+
+    recordAdminAudit({
+      adminUserId: req.auth.user.id,
+      action: "delete_user",
+      targetType: "user",
+      targetId: target.id,
+      detail: { targetUsername: target.username },
+      ...reqMeta(req),
+    });
+    return res.json({ success: true, message: `已删除账号 ${target.username}` });
   },
 );
 
@@ -941,6 +977,8 @@ router.get("/activation-codes", (_req, res) => {
         bindingUsername: binding?.bindingUsername || null,
         bindingExpiresAt: binding?.expiresAt || null,
         bindingActive: Boolean(activeBinding),
+        saleAmountCents: row.saleAmountCents,
+        saleCurrency: row.saleCurrency,
       };
     }),
   });
@@ -971,12 +1009,29 @@ router.post(
     }
 
     const result = transaction(() => {
+      if (referralConversionRepository.existsPaidByActivationCodeId(req.params.id)) {
+        return {
+          blocked: true,
+        };
+      }
       const deletedBindings = tokenActivationRepository.deleteByActivationCodeId({
         activationCodeId: req.params.id,
       });
       const resetCodes = activationCodeRepository.resetBindingById(req.params.id);
-      return { deletedBindings, resetCodes };
+      const voidedConversions = referralConversionRepository.voidByActivationCodeIdExcludingPaid({
+        activationCodeId: req.params.id,
+        note: "管理员解绑激活码，未结算推广返佣已作废",
+        updatedAt: nowIso(),
+      });
+      return { deletedBindings, resetCodes, voidedConversions };
     });
+
+    if (result?.blocked) {
+      return res.status(409).json({
+        success: false,
+        message: "该激活码已有已结算返佣，不能解绑；如需补偿请创建新激活码",
+      });
+    }
 
     recordAdminAudit({
       adminUserId: req.auth.user.id,
@@ -986,13 +1041,14 @@ router.post(
       detail: {
         deletedBindings: result.deletedBindings,
         resetCodes: result.resetCodes,
+        voidedConversions: result.voidedConversions,
       },
       ...reqMeta(req),
     });
 
     return res.json({
       success: true,
-      message: "该激活码绑定已清除",
+      message: "绑定关系已清除，消费记录保留，旧激活码不会恢复可用；如需补偿请创建新激活码",
       data: result,
     });
   },
@@ -1002,24 +1058,35 @@ router.post(
   "/activation-codes/unbind-all",
   adminWriteLimiter,
   sensitiveActionRequired,
-  (_req, res) => {
+  (req, res) => {
+    if (referralConversionRepository.existsAnyPaidConversion()) {
+      return res.status(409).json({
+        success: false,
+        message: "存在已结算返佣记录，不能批量解绑；如需补偿请创建新激活码",
+      });
+    }
+
     const result = transaction(() => {
       const deletedBindings = tokenActivationRepository.deleteAll();
       const resetCodes = activationCodeRepository.resetAllConsumedBindings();
-      return { deletedBindings, resetCodes };
+      const voidedConversions = referralConversionRepository.voidAllExcludingPaid({
+        note: "管理员清空全部激活码绑定，未结算推广返佣已作废",
+        updatedAt: nowIso(),
+      });
+      return { deletedBindings, resetCodes, voidedConversions };
     });
 
     recordAdminAudit({
-      adminUserId: _req.auth.user.id,
+      adminUserId: req.auth.user.id,
       action: "unbind_all_activation_codes",
       targetType: "activation_code",
       detail: result,
-      ...reqMeta(_req),
+      ...reqMeta(req),
     });
 
     return res.json({
       success: true,
-      message: "已清除全部激活码绑定",
+      message: "绑定关系已清除，消费记录保留，旧激活码不会恢复可用；如需补偿请创建新激活码",
       data: result,
     });
   },
@@ -1033,9 +1100,12 @@ router.post(
   (req, res) => {
     const count = Number(req.body?.count) || 1;
     const featureScope = normalizeAccessScope(req.body?.featureScope);
-    const durationMonths = Number(req.body?.durationMonths) || 1;
-    if (![1, 3, 6, 12].includes(durationMonths)) {
-      return res.status(400).json({ success: false, message: "激活时长仅支持 1/3/6/12 个月" });
+    const durationMonths = normalizeActivationDurationMonths(req.body?.durationMonths);
+    const saleAmountCents = isOneDayActivationDuration(durationMonths)
+      ? 0
+      : Math.max(0, Number(req.body?.saleAmountCents) || 0);
+    if (!isAllowedActivationDurationMonths(durationMonths)) {
+      return res.status(400).json({ success: false, message: "激活时长仅支持 1天/1/3/6/12 个月" });
     }
 
     const created = [];
@@ -1052,6 +1122,7 @@ router.post(
         createdBy: req.auth.user.id,
         featureScope,
         durationMonths,
+        saleAmountCents,
         createdAt,
       });
       created.push({
@@ -1059,6 +1130,8 @@ router.post(
         code,
         featureScope,
         durationMonths,
+        saleAmountCents,
+        saleCurrency: "CNY",
         createdAt,
       });
     }
@@ -1071,6 +1144,7 @@ router.post(
         count: created.length,
         featureScope,
         durationMonths,
+        saleAmountCents,
       },
       ...reqMeta(req),
     });

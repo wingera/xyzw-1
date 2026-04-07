@@ -29,6 +29,11 @@ const ADMIN_ACTION_LABELS = {
   create_activation_codes: "生成激活码",
   disable_activation_code: "禁用激活码",
   delete_activation_code: "删除激活码",
+  mark_referral_conversion_paid: "标记推广返佣已结算",
+  reject_referral_conversion: "拒绝推广返佣",
+  create_wechat_contact: "创建微信联系人",
+  update_wechat_contact: "更新微信联系人",
+  delete_wechat_contact: "删除微信联系人",
   broadcast_changelog_notice: "发送更新日志通知",
   update_feedback_status: "更新反馈状态",
   confirm_sensitive_action: "通过管理员二次确认",
@@ -41,6 +46,9 @@ const ADMIN_TARGET_TYPE_LABELS = {
   user_notification: "站内通知",
   invite_code: "邀请码",
   activation_code: "激活码",
+  referral_attribution: "推广归因",
+  referral_conversion: "推广返佣台账",
+  wechat_contact: "微信联系人",
 };
 
 const getAdminActionLabel = (action) =>

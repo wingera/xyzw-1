@@ -45,6 +45,10 @@ test("hasSensitiveWsUrlParams detects common sensitive wsUrl query keys", () => 
     true,
   );
   assert.equal(
+    hasSensitiveWsUrlParams("wss://example.com/agent?sid2=s123&lang=chinese"),
+    true,
+  );
+  assert.equal(
     hasSensitiveWsUrlParams("wss://example.com/agent?lang=chinese"),
     false,
   );
@@ -58,5 +62,15 @@ test("sanitizeWsUrl masks sensitive wsUrl query values", () => {
   assert.equal(sanitized.startsWith("wss://example.com/agent?"), true);
   assert.equal(sanitized.includes("abc123"), false);
   assert.equal(sanitized.includes("xyz789"), false);
+  assert.equal(sanitized.includes("lang=chinese"), true);
+});
+
+test("sanitizeWsUrl masks LegionWar sid2 while preserving non-sensitive params", () => {
+  const sanitized = sanitizeWsUrl(
+    "wss://example.com/agent?p=abc&sid2=s123&lang=chinese",
+  );
+
+  assert.equal(sanitized.includes("abc"), false);
+  assert.equal(sanitized.includes("s123"), false);
   assert.equal(sanitized.includes("lang=chinese"), true);
 });

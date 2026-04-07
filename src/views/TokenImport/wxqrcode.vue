@@ -290,10 +290,46 @@ const XYZW_RUNTIME_SCRIPT_URLS = [
 ];
 const XYZW_RUNTIME_SCRIPT_ATTR = "data-xyzw-runtime";
 let xyzwRuntimeLoadPromise: Promise<void> | null = null;
+const runtimeSessionIdFallback = new Map<string, string>();
 
-const getRuntimeRandomId = (prefix: string) => {
+const getSessionStorage = () => {
+  try {
+    return globalThis.sessionStorage || null;
+  } catch {
+    return null;
+  }
+};
+
+const getLocalStorage = () => {
+  try {
+    return globalThis.localStorage || null;
+  } catch {
+    return null;
+  }
+};
+
+const clearLegacyLocalStorageItem = (key: string) => {
+  const storage = getLocalStorage();
+  if (!storage) {
+    return;
+  }
+  try {
+    storage.removeItem(key);
+  } catch {
+    // ignore
+  }
+};
+
+const getRuntimeSessionId = (prefix: string) => {
   const storageKey = `xyzw:${prefix}:id`;
-  const existing = globalThis.localStorage?.getItem(storageKey);
+  clearLegacyLocalStorageItem(storageKey);
+
+  const sessionStorage = getSessionStorage();
+  const existing = String(
+    sessionStorage?.getItem(storageKey)
+    || runtimeSessionIdFallback.get(storageKey)
+    || "",
+  ).trim();
   if (existing) {
     return existing;
   }
@@ -304,12 +340,21 @@ const getRuntimeRandomId = (prefix: string) => {
       : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
 
   const value = `${prefix.toUpperCase()}-${randomPart}`;
-  globalThis.localStorage?.setItem(storageKey, value);
+  if (sessionStorage) {
+    try {
+      sessionStorage.setItem(storageKey, value);
+      return value;
+    } catch {
+      // fall through to in-memory storage
+    }
+  }
+  runtimeSessionIdFallback.set(storageKey, value);
   return value;
 };
 
-const distinctId = getRuntimeRandomId("did");
-const deviceUniqueId = getRuntimeRandomId("did");
+const runtimeDid = getRuntimeSessionId("did");
+const distinctId = runtimeDid;
+const deviceUniqueId = runtimeDid;
 
 const ensureRuntimeHostAllowed = () => {
   const host = String(window.location.hostname || "")
@@ -755,20 +800,16 @@ const checkScanStatus = async () => {
       return;
     }
 
-    // 使用微信官方推荐的扫码状态轮询路径
-    const url = `${WECHAT_PROXY_BASE}/qrstatus?uuid=${
-      qrcodeUUID.value
-    }&f=url&_=${Date.now()}`;
-
     const res = await new Promise((resolve) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("GET", url, true);
+      xhr.open("POST", `${WECHAT_PROXY_BASE}/qrstatus`, true);
       xhr.timeout = 5000;
       xhr.setRequestHeader("Accept", "*/*");
+      xhr.setRequestHeader("Content-Type", "application/json");
       xhr.onload = () => resolve(xhr);
       xhr.onerror = () => resolve({ status: 0 });
       xhr.ontimeout = () => resolve({ status: 0 });
-      xhr.send();
+      xhr.send(JSON.stringify({ uuid: qrcodeUUID.value }));
     });
 
     if (res.status === 200) {
@@ -886,7 +927,6 @@ const getEncryptedData = async (code) => {
     `&timestamp=${Date.now()}&version=android-4.2.1-cn-release` +
     `&cryptVersion=1.1.0` +
     `&gameTp=app&system=android` +
-    `&deviceUniqueId=${encodeURIComponent(deviceUniqueId)}` +
     `&packageName=com.hortorgames.xyzw`;
 
   const res = await new Promise((resolve, reject) => {
@@ -895,6 +935,7 @@ const getEncryptedData = async (code) => {
     xhr.timeout = 15000;
     xhr.setRequestHeader("Accept", "*/*");
     xhr.setRequestHeader("Content-Type", "text/plain; charset=utf-8");
+    xhr.setRequestHeader("X-XYZW-Device-Unique-Id", deviceUniqueId);
     xhr.onload = () => resolve(xhr);
     xhr.onerror = () =>
       reject(new Error(t("tokenImportWxQrcode.errors.loginFailed")));

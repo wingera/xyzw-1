@@ -477,6 +477,16 @@ const markPostLoginMfaSuggestion = () => {
   window.sessionStorage.setItem("xyzw:post-login-mfa-suggestion", "1");
 };
 
+const isRecoverableChunkLoadError = (error) => {
+  const message = String(error?.message || error || "").toLowerCase();
+  return [
+    "failed to fetch dynamically imported module",
+    "error loading dynamically imported module",
+    "importing a module script failed",
+    "unable to preload css for",
+  ].some(fragment => message.includes(fragment));
+};
+
 const finishLogin = () => {
   formErrorMessage.value = "";
   message.success(t("login.messages.success"));
@@ -492,7 +502,14 @@ const finishLogin = () => {
     content: t("login.notice.content"),
     positiveText: t("login.notice.confirm"),
     onPositiveClick: () => {
-      router.push(redirect);
+      router.push(redirect).catch((error) => {
+        if (isRecoverableChunkLoadError(error) && typeof window !== "undefined") {
+          window.location.assign(redirect);
+          return;
+        }
+        console.error("[login] redirect failed:", error);
+        message.error(error?.message || "跳转失败，请刷新后重试");
+      });
     },
   });
 };

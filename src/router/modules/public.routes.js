@@ -81,6 +81,25 @@ export const publicRoutes = [
     }),
   },
   {
+    path: "/r/:code",
+    name: "ReferralLanding",
+    component: () => import("@/views/ReferralLanding.vue"),
+    meta: withRouteMeta({
+      title: "推广邀请",
+      layout: "public",
+      hidden: true,
+    }),
+  },
+  {
+    path: "/wx/:slug",
+    name: "PublicWechatContact",
+    component: () => import("@/views/PublicWechatContact.vue"),
+    meta: withRouteMeta({
+      title: "微信联系",
+      layout: "public",
+    }),
+  },
+  {
     path: "/:pathMatch(.*)*",
     name: "NotFound",
     component: () => import("@/views/NotFound.vue"),

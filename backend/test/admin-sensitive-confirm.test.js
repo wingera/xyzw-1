@@ -6,6 +6,7 @@ import { nowIso } from "../src/db/sql.js";
 import { query, run } from "../src/db/client.js";
 import adminRoutes from "../src/routes/admin.js";
 import { createPassword, signJwt } from "../src/lib/crypto.js";
+import { userRepository } from "../src/repositories/userRepository.js";
 import {
   createMfaSetupPayload,
   encryptMfaSecret,
@@ -78,6 +79,19 @@ const enableAdminMfa = ({ userId, username }) => {
     },
   );
   return mfaSetup;
+};
+
+const fetchAdminConfirmToken = async ({ baseUrl, adminUser, secret }) => {
+  const response = await fetch(`${baseUrl}/api/v1/admin/confirm-password`, {
+    method: "POST",
+    headers: authHeaders({ userId: adminUser.id, username: adminUser.username }),
+    body: JSON.stringify({
+      totpCode: generateTotpCode({ secret }),
+    }),
+  });
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  return String(payload?.data?.token || "");
 };
 
 test("admin high-risk actions require password confirmation token", async (t) => {
@@ -355,6 +369,27 @@ test("admin high-risk actions require password confirmation token", async (t) =>
   });
   assert.equal(createActivationAllowed.status, 200);
 
+  const createTrialActivationAllowed = await fetch(`${baseUrl}/api/v1/admin/activation-codes`, {
+    method: "POST",
+    headers: {
+      ...authHeaders({ userId: adminUser.id, username: adminUser.username }),
+      "x-admin-confirm-token": confirmPayload.data.token,
+    },
+    body: JSON.stringify({ count: 1, durationMonths: 0, saleAmountCents: 999 }),
+  });
+  assert.equal(createTrialActivationAllowed.status, 200);
+  const createTrialActivationPayload = await createTrialActivationAllowed.json();
+  const createdTrialActivationId = String(createTrialActivationPayload?.data?.[0]?.id || "");
+  assert.ok(createdTrialActivationId, "expected created trial activation code id");
+  const createdTrialActivationRows = query(
+    `SELECT duration_months as durationMonths, sale_amount_cents as saleAmountCents
+     FROM activation_codes
+     WHERE id = $id`,
+    { $id: createdTrialActivationId },
+  );
+  assert.equal(Number(createdTrialActivationRows[0]?.durationMonths), 0);
+  assert.equal(Number(createdTrialActivationRows[0]?.saleAmountCents), 0);
+
   const updatedRows = query(`SELECT is_admin as isAdmin FROM users WHERE id = $id`, { $id: targetUser.id });
   assert.equal(Number(updatedRows[0]?.isAdmin), 1);
 });
@@ -481,4 +516,331 @@ test("admin routes require MFA-enabled admin account", async (t) => {
   assert.equal(denied.status, 403);
   const payload = await denied.json();
   assert.equal(payload?.error?.code, "AUTH_ADMIN_MFA_REQUIRED");
+});
+
+test("admin delete user blocks referral history and still allows deleting normal users", async (t) => {
+  await initDatabase();
+
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const adminUser = {
+    id: `delete_admin_${suffix}`,
+    username: `delete_admin_${suffix}`,
+    password: "Admin1234!Aa",
+  };
+  const deletableUser = {
+    id: `delete_ok_${suffix}`,
+    username: `delete_ok_${suffix}`,
+    password: "Delete1234!Aa",
+  };
+  const profileBlockedUser = {
+    id: `delete_profile_${suffix}`,
+    username: `delete_profile_${suffix}`,
+    password: "Delete1234!Aa",
+  };
+  const attrBlockedUser = {
+    id: `delete_attr_${suffix}`,
+    username: `delete_attr_${suffix}`,
+    password: "Delete1234!Aa",
+  };
+  const attrReferrer = {
+    id: `delete_attr_referrer_${suffix}`,
+    username: `delete_attr_referrer_${suffix}`,
+    password: "Delete1234!Aa",
+  };
+  const convBlockedUser = {
+    id: `delete_conv_${suffix}`,
+    username: `delete_conv_${suffix}`,
+    password: "Delete1234!Aa",
+  };
+  const convReferrer = {
+    id: `delete_conv_referrer_${suffix}`,
+    username: `delete_conv_referrer_${suffix}`,
+    password: "Delete1234!Aa",
+  };
+  const convAttributionReferred = {
+    id: `delete_conv_attr_${suffix}`,
+    username: `delete_conv_attr_${suffix}`,
+    password: "Delete1234!Aa",
+  };
+  const allUsers = [
+    adminUser,
+    deletableUser,
+    profileBlockedUser,
+    attrBlockedUser,
+    attrReferrer,
+    convBlockedUser,
+    convReferrer,
+    convAttributionReferred,
+  ];
+  const allUserIds = allUsers.map((item) => item.id);
+
+  run(`DELETE FROM referral_settlements WHERE conversion_id LIKE $pattern`, { $pattern: `refconv_delete_%${suffix}%` });
+  run(`DELETE FROM referral_conversions WHERE id LIKE $pattern`, { $pattern: `refconv_delete_%${suffix}%` });
+  run(`DELETE FROM referral_attributions WHERE id LIKE $pattern`, { $pattern: `refattr_delete_%${suffix}%` });
+  run(`DELETE FROM referral_profiles WHERE id LIKE $pattern`, { $pattern: `refprof_delete_%${suffix}%` });
+  run(`DELETE FROM activation_codes WHERE id LIKE $pattern`, { $pattern: `act_delete_%${suffix}%` });
+  run(`DELETE FROM admin_audit_logs WHERE admin_user_id = $adminId`, { $adminId: adminUser.id });
+  run(`DELETE FROM user_notifications WHERE user_id = $adminId`, { $adminId: adminUser.id });
+  run(`DELETE FROM security_event_logs WHERE user_id = $adminId`, { $adminId: adminUser.id });
+  run(`DELETE FROM users WHERE id IN ($adminId, $deletableId, $profileBlockedId, $attrBlockedId, $attrReferrerId, $convBlockedId, $convReferrerId, $convAttrReferredId)`, {
+    $adminId: adminUser.id,
+    $deletableId: deletableUser.id,
+    $profileBlockedId: profileBlockedUser.id,
+    $attrBlockedId: attrBlockedUser.id,
+    $attrReferrerId: attrReferrer.id,
+    $convBlockedId: convBlockedUser.id,
+    $convReferrerId: convReferrer.id,
+    $convAttrReferredId: convAttributionReferred.id,
+  });
+
+  for (const user of allUsers) {
+    insertUser({
+      ...user,
+      isAdmin: user.id === adminUser.id,
+    });
+  }
+  const adminMfaSetup = enableAdminMfa({ userId: adminUser.id, username: adminUser.username });
+
+  const ts = nowIso();
+  const attrReferralProfileId = `refprof_delete_attr_${suffix}`;
+  const convReferralProfileId = `refprof_delete_conv_${suffix}`;
+  run(
+    `INSERT INTO referral_profiles (id, user_id, referral_code, created_at, updated_at, generated_at)
+     VALUES ($id, $userId, $referralCode, $createdAt, $updatedAt, $generatedAt)`,
+    {
+      $id: `refprof_delete_profile_${suffix}`,
+      $userId: profileBlockedUser.id,
+      $referralCode: `DELPROF${suffix.replace(/[^a-zA-Z0-9]/g, "").slice(-10).toUpperCase()}`,
+      $createdAt: ts,
+      $updatedAt: ts,
+      $generatedAt: ts,
+    },
+  );
+  run(
+    `INSERT INTO referral_profiles (id, user_id, referral_code, created_at, updated_at, generated_at)
+     VALUES ($id, $userId, $referralCode, $createdAt, $updatedAt, $generatedAt)`,
+    {
+      $id: attrReferralProfileId,
+      $userId: attrReferrer.id,
+      $referralCode: `DELATTR${suffix.replace(/[^a-zA-Z0-9]/g, "").slice(-10).toUpperCase()}`,
+      $createdAt: ts,
+      $updatedAt: ts,
+      $generatedAt: ts,
+    },
+  );
+  run(
+    `INSERT INTO referral_profiles (id, user_id, referral_code, created_at, updated_at, generated_at)
+     VALUES ($id, $userId, $referralCode, $createdAt, $updatedAt, $generatedAt)`,
+    {
+      $id: convReferralProfileId,
+      $userId: convReferrer.id,
+      $referralCode: `DELCNV${suffix.replace(/[^a-zA-Z0-9]/g, "").slice(-10).toUpperCase()}`,
+      $createdAt: ts,
+      $updatedAt: ts,
+      $generatedAt: ts,
+    },
+  );
+  run(
+    `INSERT INTO referral_attributions (
+      id, referrer_user_id, referred_user_id, referral_profile_id, referral_code_snapshot,
+      invite_code_id, invite_code_mask, registered_at, register_ip, register_user_agent, created_at, updated_at
+    ) VALUES (
+      $id, $referrerUserId, $referredUserId, $referralProfileId, $referralCodeSnapshot,
+      NULL, NULL, $registeredAt, NULL, NULL, $createdAt, $updatedAt
+    )`,
+    {
+      $id: `refattr_delete_block_${suffix}`,
+      $referrerUserId: attrReferrer.id,
+      $referredUserId: attrBlockedUser.id,
+      $referralProfileId: attrReferralProfileId,
+      $referralCodeSnapshot: `ATTR${suffix.replace(/[^a-zA-Z0-9]/g, "").slice(-8).toUpperCase()}`,
+      $registeredAt: ts,
+      $createdAt: ts,
+      $updatedAt: ts,
+    },
+  );
+  run(
+    `INSERT INTO referral_attributions (
+      id, referrer_user_id, referred_user_id, referral_profile_id, referral_code_snapshot,
+      invite_code_id, invite_code_mask, registered_at, register_ip, register_user_agent, created_at, updated_at
+    ) VALUES (
+      $id, $referrerUserId, $referredUserId, $referralProfileId, $referralCodeSnapshot,
+      NULL, NULL, $registeredAt, NULL, NULL, $createdAt, $updatedAt
+    )`,
+    {
+      $id: `refattr_delete_conv_${suffix}`,
+      $referrerUserId: convReferrer.id,
+      $referredUserId: convAttributionReferred.id,
+      $referralProfileId: convReferralProfileId,
+      $referralCodeSnapshot: `CONV${suffix.replace(/[^a-zA-Z0-9]/g, "").slice(-8).toUpperCase()}`,
+      $registeredAt: ts,
+      $createdAt: ts,
+      $updatedAt: ts,
+    },
+  );
+  run(
+    `INSERT INTO activation_codes (
+      id, code, created_by, duration_months, used_by, used_at, bound_token_id, bound_game_account_id, is_deleted, is_active, created_at
+    ) VALUES (
+      $id, $code, $createdBy, 1, NULL, NULL, NULL, NULL, 0, 1, $createdAt
+    )`,
+    {
+      $id: `act_delete_${suffix}`,
+      $code: `ACTDEL${suffix.replace(/[^a-zA-Z0-9]/g, "").slice(-12).toUpperCase()}`,
+      $createdBy: adminUser.id,
+      $createdAt: ts,
+    },
+  );
+  run(
+    `INSERT INTO referral_conversions (
+      id, referrer_user_id, referred_user_id, referral_attribution_id, activation_code_id, token_activation_id,
+      conversion_type, feature_scope, duration_months, gross_amount_cents, reward_rate_bps, reward_amount_cents,
+      reward_status, note, created_at, updated_at, paid_at, paid_by
+    ) VALUES (
+      $id, $referrerUserId, $referredUserId, $referralAttributionId, $activationCodeId, NULL,
+      'first_purchase', 'full', 1, 10000, 5000, 5000,
+      'pending', '', $createdAt, $updatedAt, NULL, NULL
+    )`,
+    {
+      $id: `refconv_delete_block_${suffix}`,
+      $referrerUserId: convReferrer.id,
+      $referredUserId: convBlockedUser.id,
+      $referralAttributionId: `refattr_delete_conv_${suffix}`,
+      $activationCodeId: `act_delete_${suffix}`,
+      $createdAt: ts,
+      $updatedAt: ts,
+    },
+  );
+
+  const server = await createAppServer();
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    run(`DELETE FROM referral_settlements WHERE conversion_id LIKE $pattern`, { $pattern: `refconv_delete_%${suffix}%` });
+    run(`DELETE FROM referral_conversions WHERE id LIKE $pattern`, { $pattern: `refconv_delete_%${suffix}%` });
+    run(`DELETE FROM referral_attributions WHERE id LIKE $pattern`, { $pattern: `refattr_delete_%${suffix}%` });
+    run(`DELETE FROM referral_profiles WHERE id LIKE $pattern`, { $pattern: `refprof_delete_%${suffix}%` });
+    run(`DELETE FROM activation_codes WHERE id LIKE $pattern`, { $pattern: `act_delete_%${suffix}%` });
+    run(`DELETE FROM admin_audit_logs WHERE admin_user_id = $adminId`, { $adminId: adminUser.id });
+    run(`DELETE FROM user_notifications WHERE user_id = $adminId`, { $adminId: adminUser.id });
+    run(`DELETE FROM security_event_logs WHERE user_id = $adminId`, { $adminId: adminUser.id });
+    run(`DELETE FROM users WHERE id IN ($adminId, $deletableId, $profileBlockedId, $attrBlockedId, $attrReferrerId, $convBlockedId, $convReferrerId, $convAttrReferredId)`, {
+      $adminId: adminUser.id,
+      $deletableId: deletableUser.id,
+      $profileBlockedId: profileBlockedUser.id,
+      $attrBlockedId: attrBlockedUser.id,
+      $attrReferrerId: attrReferrer.id,
+      $convBlockedId: convBlockedUser.id,
+      $convReferrerId: convReferrer.id,
+      $convAttrReferredId: convAttributionReferred.id,
+    });
+  });
+
+  const baseUrl = makeBaseUrl(server);
+  const confirmToken = await fetchAdminConfirmToken({
+    baseUrl,
+    adminUser,
+    secret: adminMfaSetup.secret,
+  });
+  const headers = {
+    ...authHeaders({ userId: adminUser.id, username: adminUser.username }),
+    "x-admin-confirm-token": confirmToken,
+  };
+
+  const deletableRes = await fetch(`${baseUrl}/api/v1/admin/users/${deletableUser.id}`, {
+    method: "DELETE",
+    headers,
+  });
+  assert.equal(deletableRes.status, 200);
+  assert.equal(userRepository.findAdminUserBasic(deletableUser.id), null);
+
+  for (const target of [profileBlockedUser, attrBlockedUser, convBlockedUser]) {
+    const response = await fetch(`${baseUrl}/api/v1/admin/users/${target.id}`, {
+      method: "DELETE",
+      headers,
+    });
+    assert.equal(response.status, 409);
+    const payload = await response.json();
+    assert.equal(payload?.code, "USER_DELETE_BLOCKED_BY_REFERRAL_HISTORY");
+    assert.match(String(payload?.message || ""), /推广归因\/返佣历史/);
+    assert.ok(userRepository.findAdminUserBasic(target.id));
+  }
+});
+
+test("admin delete user converts referral foreign key failure into 409", async (t) => {
+  await initDatabase();
+
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const adminUser = {
+    id: `delete_fk_admin_${suffix}`,
+    username: `delete_fk_admin_${suffix}`,
+    password: "Admin1234!Aa",
+  };
+  const blockedUser = {
+    id: `delete_fk_target_${suffix}`,
+    username: `delete_fk_target_${suffix}`,
+    password: "Delete1234!Aa",
+  };
+
+  run(`DELETE FROM referral_profiles WHERE id = $id`, { $id: `refprof_delete_fk_${suffix}` });
+  run(`DELETE FROM admin_audit_logs WHERE admin_user_id = $adminId`, { $adminId: adminUser.id });
+  run(`DELETE FROM user_notifications WHERE user_id = $adminId`, { $adminId: adminUser.id });
+  run(`DELETE FROM security_event_logs WHERE user_id = $adminId`, { $adminId: adminUser.id });
+  run(`DELETE FROM users WHERE id IN ($adminId, $targetId)`, {
+    $adminId: adminUser.id,
+    $targetId: blockedUser.id,
+  });
+
+  insertUser({ ...adminUser, isAdmin: true });
+  insertUser(blockedUser);
+  const adminMfaSetup = enableAdminMfa({ userId: adminUser.id, username: adminUser.username });
+  run(
+    `INSERT INTO referral_profiles (id, user_id, referral_code, created_at, updated_at, generated_at)
+     VALUES ($id, $userId, $referralCode, $createdAt, $updatedAt, $generatedAt)`,
+    {
+      $id: `refprof_delete_fk_${suffix}`,
+      $userId: blockedUser.id,
+      $referralCode: `FKDEL${suffix.replace(/[^a-zA-Z0-9]/g, "").slice(-10).toUpperCase()}`,
+      $createdAt: nowIso(),
+      $updatedAt: nowIso(),
+      $generatedAt: nowIso(),
+    },
+  );
+
+  const originalHasBlockingReferralHistory = userRepository.hasBlockingReferralHistory;
+  userRepository.hasBlockingReferralHistory = () => false;
+  t.after(() => {
+    userRepository.hasBlockingReferralHistory = originalHasBlockingReferralHistory;
+  });
+
+  const server = await createAppServer();
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    run(`DELETE FROM referral_profiles WHERE id = $id`, { $id: `refprof_delete_fk_${suffix}` });
+    run(`DELETE FROM admin_audit_logs WHERE admin_user_id = $adminId`, { $adminId: adminUser.id });
+    run(`DELETE FROM user_notifications WHERE user_id = $adminId`, { $adminId: adminUser.id });
+    run(`DELETE FROM security_event_logs WHERE user_id = $adminId`, { $adminId: adminUser.id });
+    run(`DELETE FROM users WHERE id IN ($adminId, $targetId)`, {
+      $adminId: adminUser.id,
+      $targetId: blockedUser.id,
+    });
+  });
+
+  const baseUrl = makeBaseUrl(server);
+  const confirmToken = await fetchAdminConfirmToken({
+    baseUrl,
+    adminUser,
+    secret: adminMfaSetup.secret,
+  });
+
+  const response = await fetch(`${baseUrl}/api/v1/admin/users/${blockedUser.id}`, {
+    method: "DELETE",
+    headers: {
+      ...authHeaders({ userId: adminUser.id, username: adminUser.username }),
+      "x-admin-confirm-token": confirmToken,
+    },
+  });
+  assert.equal(response.status, 409);
+  const payload = await response.json();
+  assert.equal(payload?.code, "USER_DELETE_BLOCKED_BY_REFERRAL_HISTORY");
+  assert.ok(userRepository.findAdminUserBasic(blockedUser.id));
 });

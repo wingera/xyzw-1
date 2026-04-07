@@ -1067,6 +1067,7 @@
       "quietWindowEnabledNow": "Quiet hours were enabled immediately ({time}), and {count} connection(s) were closed",
       "quietWindowEnabled": "Quiet hours enabled",
       "quietWindowDisabled": "Quiet hours disabled",
+      "quietWindowSaveFailed": "Failed to save quiet hours setting: {error}",
       "clearLogsFailed": "Failed to clear logs",
       "allTasksEnabled": "All tasks enabled",
       "allTasksDisabled": "All tasks disabled",
@@ -1114,6 +1115,12 @@
         "desc": "Go straight to sign-in after registration"
       }
     },
+    "referral": {
+      "title": "Referral attribution detected",
+      "referrer": "Referrer: {username}",
+      "code": "Referral code: {code}",
+      "hint": "Referral links only handle attribution and do not replace invite codes. You still need an invite code to register."
+    },
     "validation": {
       "usernameRequired": "Please enter a username",
       "usernameLength": "Username must be between 3 and 20 characters",
@@ -1128,7 +1135,10 @@
     "messages": {
       "agreeRequired": "Please agree to the Terms of Service and Privacy Policy first",
       "successLogin": "Registration successful. Please sign in.",
-      "successTrial": "Registration successful. Please complete formal use before expiration."
+      "successTrial": "Registration successful. Please complete formal use before expiration.",
+      "referralInvalid": "The referral information is invalid. Please enter again through the referral link.",
+      "referralMismatch": "The referral information does not match. Please enter again through the referral link.",
+      "referralExpired": "The referral information has expired. Please enter again through the referral link."
     },
     "passwordStrength": {
       "title": "Current password strength",
@@ -2924,6 +2934,7 @@
     "actions": {
       "formation": "Arena Formation",
       "fightCount": "Battle Count",
+      "preferredWinRate": "Preferred Win Rate (Min %)",
       "refresh": "Refresh Score & Rank",
       "start": "Start Arena",
       "skipLineups": "Skip opponent lineups (defaults include Lu-Zhao and Guan Yu)",
@@ -2938,6 +2949,7 @@
       "clearRecords": "Clear Records"
     },
     "placeholders": {
+      "preferredWinRate": "e.g. 75, only prioritize 75% and above",
       "skipLineups": "Enter custom lineup keywords",
       "manualTarget": "Select from rank list / records",
       "manualRoleId": "e.g. 277019638",
@@ -3319,37 +3331,51 @@
     "eyebrow": "Pricing",
     "title": "Choose the version you need",
     "subtitle": "This page lists the current purchase options and the difference between the normal and full versions.",
+    "durationPicker": {
+      "label": "Pricing Duration",
+      "title": "Switch between monthly, quarterly, half-year, and yearly pricing",
+      "description": "Use the selector to update bundle and activation prices for the duration you want to review.",
+      "month": "1 month",
+      "quarter": "1 quarter",
+      "halfYear": "6 months",
+      "year": "1 year",
+      "shortMonth": "Month",
+      "shortQuarter": "Quarter",
+      "shortHalfYear": "Half Year",
+      "shortYear": "Year",
+      "current": "Currently showing {label} pricing"
+    },
     "actions": {
       "backHome": "Back to Home",
       "registerNow": "Register with Invite Code"
     },
     "cards": {
-      "unit": "per month",
+      "unit": "by duration",
       "inviteNormal": {
         "badge": "Bundle",
         "title": "Invite Code + Normal Activation",
         "description": "For users who need registration plus the normal version.",
-        "price": "10 yuan",
-        "unit": "per bundle"
+        "price": "from 8 yuan",
+        "unit": "by duration"
       },
       "inviteFull": {
         "badge": "Bundle",
         "title": "Invite Code + Full Activation",
         "description": "For users who want registration plus the full version.",
-        "price": "32 yuan",
-        "unit": "per bundle"
+        "price": "from 32 yuan",
+        "unit": "by duration"
       },
       "activationNormal": {
         "badge": "Activation Only",
         "title": "Normal Activation Code",
         "description": "For existing accounts that only need the normal version.",
-        "price": "8 yuan"
+        "price": "from 6 yuan"
       },
       "activationFull": {
         "badge": "Activation Only",
         "title": "Full Activation Code",
         "description": "For existing accounts that need the full version.",
-        "price": "30 yuan"
+        "price": "from 30 yuan"
       },
       "tokenLimit": {
         "badge": "Add-on",
@@ -3637,5 +3663,156 @@
       "actions": "Actions"
     },
     "empty": "No invite code data"
+  },
+  "referralLanding": {
+    "title": "Referral Invitation",
+    "loading": "Resolving referral link, please wait...",
+    "redirecting": "Redirecting to the registration page",
+    "invalid": "Invalid referral link. Redirecting to the registration page."
+  },
+  "referralCenter": {
+    "title": "Referral Center",
+    "subtitle": "Manage your dedicated referral link and review attribution plus commission records.",
+    "actions": {
+      "refresh": "Refresh",
+      "generate": "Generate Referral Link",
+      "copyLink": "Copy Referral Link"
+    },
+    "summary": {
+      "code": "Referral code",
+      "notGenerated": "Not generated",
+      "codeHint": "Each account can generate only one",
+      "invitedUsers": "Registered referrals",
+      "invitedUsersHint": "Users who completed registration through your referral link",
+      "pending": "Pending amount",
+      "pendingHint": "Waiting for manual settlement by admins",
+      "paid": "Paid amount",
+      "paidHint": "Already marked paid by admins"
+    },
+    "share": {
+      "title": "Referral link",
+      "subtitle": "Share this link with friends. They still need an invite code to register.",
+      "empty": "Generate your referral link first to start inviting."
+    },
+    "rules": {
+      "firstPurchase": "50% commission on the first successful paid activation",
+      "renewal": "20% commission on later renewals longer than 2 months",
+      "claim": "Please add the admin on WeChat to claim commission"
+    },
+    "list": {
+      "title": "Referral conversion records",
+      "count": "{count} record(s)"
+    },
+    "columns": {
+      "user": "Referred user",
+      "type": "Conversion type",
+      "duration": "Duration",
+      "monthUnit": " mo",
+      "gross": "Gross amount",
+      "reward": "Reward amount",
+      "status": "Reward status",
+      "settlementChannel": "Settlement channel",
+      "settledAt": "Settled at",
+      "createdAt": "Recorded at"
+    },
+    "settlementChannels": {
+      "wechat_manual": "WeChat manual",
+      "bank": "Bank transfer",
+      "other": "Other"
+    },
+    "conversionTypes": {
+      "first_purchase": "First paid purchase",
+      "renewal_gt_2m": "Renewal longer than 2 months",
+      "renewal_le_2m": "Renewal not eligible"
+    },
+    "rewardStatus": {
+      "pending": "Pending",
+      "paid": "Paid",
+      "rejected": "Rejected",
+      "void": "Voided",
+      "not_eligible": "Not eligible"
+    },
+    "messages": {
+      "loadFailed": "Failed to load referral data",
+      "generateFailed": "Failed to generate referral link",
+      "generated": "Your referral link is ready",
+      "copied": "Referral link copied",
+      "copyFailed": "Copy failed. Please copy it manually"
+    }
+  },
+  "adminReferralsPage": {
+    "title": "Referral Management",
+    "subtitle": "Review registration attribution and commission ledgers, then process manual settlements.",
+    "actions": {
+      "refresh": "Refresh",
+      "markPaid": "Mark Paid",
+      "reject": "Reject"
+    },
+    "attributions": {
+      "title": "Registration attribution",
+      "count": "{count} record(s)"
+    },
+    "conversions": {
+      "title": "Referral conversions / commission ledger",
+      "count": "{count} record(s)"
+    },
+    "columns": {
+      "referrer": "Referrer",
+      "referred": "Referred user",
+      "referralCode": "Referral code snapshot",
+      "inviteCode": "Invite code",
+      "registeredAt": "Registered at",
+      "type": "Conversion type",
+      "gross": "Gross amount",
+      "reward": "Reward amount",
+      "status": "Reward status",
+      "settlementChannel": "Settlement channel",
+      "settlementRef": "Settlement reference",
+      "settledAt": "Settled at",
+      "note": "Note",
+      "actions": "Actions"
+    },
+    "channels": {
+      "wechatManual": "WeChat manual",
+      "bank": "Bank transfer",
+      "other": "Other"
+    },
+    "channelLabels": {
+      "wechat_manual": "WeChat manual",
+      "bank": "Bank transfer",
+      "other": "Other"
+    },
+    "fields": {
+      "channel": "Settlement channel",
+      "settlementRef": "Settlement reference",
+      "note": "Note"
+    },
+    "confirm": {
+      "title": "Security confirmation",
+      "confirm": "Confirm",
+      "cancel": "Cancel",
+      "mfaPrompt": "Before \"{action}\", enter the current 6-digit MFA code from your authenticator.",
+      "passwordPrompt": "Before \"{action}\", enter the current admin password.",
+      "totpPlaceholder": "Enter 6-digit MFA code",
+      "passwordPlaceholder": "Enter current admin password"
+    },
+    "messages": {
+      "loadFailed": "Failed to load referral ledger",
+      "confirmTotpRequired": "Please enter the 6-digit MFA code",
+      "confirmPasswordRequired": "Please enter the current admin password",
+      "confirmCancelled": "Sensitive confirmation cancelled",
+      "confirmFailed": "Sensitive confirmation failed",
+      "confirmPassed": "Sensitive confirmation passed (valid for 5 minutes)",
+      "channelRequired": "Please choose a settlement channel",
+      "settlementRefRequired": "WeChat manual and bank settlements require a settlement reference",
+      "optionalNote": "Optional settlement note",
+      "settlementRefPlaceholder": "Optional transfer reference, settlement id, or note id",
+      "rejectNotePlaceholder": "Enter the rejection reason",
+      "rejectNoteRequired": "Please enter the rejection reason",
+      "markPaidSuccess": "Referral conversion marked as paid",
+      "markPaidFailed": "Failed to mark conversion as paid",
+      "rejectSuccess": "Referral conversion rejected",
+      "rejectFailed": "Failed to reject conversion"
+    }
   }
 }

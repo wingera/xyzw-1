@@ -1043,6 +1043,7 @@
       "quietWindowEnabledNow": "不上线时段已开启并生效（{time}），已断开 {count} 个连接",
       "quietWindowEnabled": "不上线时段已开启",
       "quietWindowDisabled": "不上线时段已关闭",
+      "quietWindowSaveFailed": "保存不上线时段设置失败：{error}",
       "clearLogsFailed": "清空日志失败",
       "allTasksEnabled": "所有任务已启用",
       "allTasksDisabled": "所有任务已关闭",
@@ -1090,6 +1091,12 @@
         "desc": "完成后直接跳转登录继续操作"
       }
     },
+    "referral": {
+      "title": "推广归因已生效",
+      "referrer": "邀请人：{username}",
+      "code": "推广码：{code}",
+      "hint": "推广链接只负责归因，不替代邀请码；注册时仍需填写邀请码。"
+    },
     "validation": {
       "usernameRequired": "请输入用户名",
       "usernameLength": "用户名长度应在3-20个字符之间",
@@ -1104,7 +1111,10 @@
     "messages": {
       "agreeRequired": "请先同意服务条款和隐私政策",
       "successLogin": "注册成功，请登录",
-      "successTrial": "注册成功，请在到期前完成正式使用"
+      "successTrial": "注册成功，请在到期前完成正式使用",
+      "referralInvalid": "推广信息无效，请重新通过推广链接进入",
+      "referralMismatch": "推广信息不一致，请重新通过推广链接进入",
+      "referralExpired": "推广信息已过期，请重新通过推广链接进入"
     },
     "passwordStrength": {
       "title": "当前密码强度",
@@ -2900,6 +2910,7 @@
     "actions": {
       "formation": "竞技场阵容",
       "fightCount": "攻打次数",
+      "preferredWinRate": "胜率优选（至少%）",
       "refresh": "刷新积分排名",
       "start": "开始竞技场",
       "skipLineups": "跳过对手阵容（默认含吕赵、关羽）",
@@ -2914,6 +2925,7 @@
       "clearRecords": "清空记录"
     },
     "placeholders": {
+      "preferredWinRate": "如：75，仅优先 75% 及以上；留空按默认",
       "skipLineups": "可输入自定义阵容关键词",
       "manualTarget": "从榜单/记录选择",
       "manualRoleId": "如：277019638",
@@ -3295,37 +3307,51 @@
     "eyebrow": "价格菜单",
     "title": "按你需要的版本来选",
     "subtitle": "这里列的是当前可购买的组合价格和版本区别。需要购买时，直接联系管理员微信即可。",
+    "durationPicker": {
+      "label": "价格周期",
+      "title": "切换查看不同周期的价格",
+      "description": "可按月、季、半年和一年切换查看，页面会同步更新组合方案和激活码价格。",
+      "month": "1个月",
+      "quarter": "1季度",
+      "halfYear": "半年",
+      "year": "一年",
+      "shortMonth": "月",
+      "shortQuarter": "季",
+      "shortHalfYear": "半年",
+      "shortYear": "年",
+      "current": "当前显示 {label} 价格"
+    },
     "actions": {
       "backHome": "返回首页",
       "registerNow": "使用邀请码注册"
     },
     "cards": {
-      "unit": "每月",
+      "unit": "按时长",
       "inviteNormal": {
         "badge": "组合方案",
         "title": "邀请码 + 激活码普通版本",
         "description": "适合先完成注册，再开通普通版本使用。",
-        "price": "10元",
-        "unit": "每份"
+        "price": "8元起",
+        "unit": "按时长"
       },
       "inviteFull": {
         "badge": "组合方案",
         "title": "邀请码 + 激活码全功能版本",
         "description": "适合注册后直接开通全功能版本使用。",
-        "price": "32元",
-        "unit": "每份"
+        "price": "32元起",
+        "unit": "按时长"
       },
       "activationNormal": {
         "badge": "单独激活",
         "title": "激活码普通版本",
         "description": "已有账号时，可直接补普通版本激活。",
-        "price": "8元"
+        "price": "6元起"
       },
       "activationFull": {
         "badge": "单独激活",
         "title": "激活码全功能版本",
         "description": "已有账号时，可直接补全功能版本激活。",
-        "price": "30元"
+        "price": "30元起"
       },
       "tokenLimit": {
         "badge": "扩展项",
@@ -3613,5 +3639,156 @@
       "actions": "操作"
     },
     "empty": "暂无邀请码数据"
+  },
+  "referralLanding": {
+    "title": "推广邀请",
+    "loading": "正在识别推广链接，请稍候...",
+    "redirecting": "即将跳转到注册页",
+    "invalid": "推广链接无效，将跳转到注册页"
+  },
+  "referralCenter": {
+    "title": "推广中心",
+    "subtitle": "管理你的专属推广链接，并查看注册归因与返佣台账。",
+    "actions": {
+      "refresh": "刷新",
+      "generate": "生成专属推广链接",
+      "copyLink": "复制推广链接"
+    },
+    "summary": {
+      "code": "专属推广码",
+      "notGenerated": "尚未生成",
+      "codeHint": "每个账号只能生成一次",
+      "invitedUsers": "邀请注册人数",
+      "invitedUsersHint": "成功完成注册的被推广用户数量",
+      "pending": "待结算金额",
+      "pendingHint": "等待管理员人工结算",
+      "paid": "已结算金额",
+      "paidHint": "管理员已标记为已结算"
+    },
+    "share": {
+      "title": "推广链接",
+      "subtitle": "把你的推广链接发给朋友，对方仍需使用邀请码注册。",
+      "empty": "先生成专属推广链接，再开始邀请。"
+    },
+    "rules": {
+      "firstPurchase": "首次成功购买返 50%",
+      "renewal": "后续单次续费超过 2 个月返 20%",
+      "claim": "佣金请添加管理员微信领取"
+    },
+    "list": {
+      "title": "邀请用户转化列表",
+      "count": "共 {count} 条"
+    },
+    "columns": {
+      "user": "被邀请用户",
+      "type": "转化类型",
+      "duration": "时长",
+      "monthUnit": "个月",
+      "gross": "消费金额",
+      "reward": "返佣金额",
+      "status": "返佣状态",
+      "settlementChannel": "结算渠道",
+      "settledAt": "结算时间",
+      "createdAt": "记录时间"
+    },
+    "settlementChannels": {
+      "wechat_manual": "微信人工结算",
+      "bank": "银行卡",
+      "other": "其他"
+    },
+    "conversionTypes": {
+      "first_purchase": "首次付费购买",
+      "renewal_gt_2m": "续费超过 2 个月",
+      "renewal_le_2m": "续费不满足返佣"
+    },
+    "rewardStatus": {
+      "pending": "待结算",
+      "paid": "已结算",
+      "rejected": "已拒绝",
+      "void": "已作废",
+      "not_eligible": "不返佣"
+    },
+    "messages": {
+      "loadFailed": "加载推广数据失败",
+      "generateFailed": "生成推广链接失败",
+      "generated": "专属推广链接已生成",
+      "copied": "推广链接已复制",
+      "copyFailed": "复制失败，请手动复制"
+    }
+  },
+  "adminReferralsPage": {
+    "title": "推广邀请管理",
+    "subtitle": "查看注册归因和激活返佣台账，并执行人工结算处理。",
+    "actions": {
+      "refresh": "刷新",
+      "markPaid": "标记已结算",
+      "reject": "拒绝"
+    },
+    "attributions": {
+      "title": "注册归因列表",
+      "count": "共 {count} 条"
+    },
+    "conversions": {
+      "title": "推广转化 / 佣金台账",
+      "count": "共 {count} 条"
+    },
+    "columns": {
+      "referrer": "推广人",
+      "referred": "被推广用户",
+      "referralCode": "推广码快照",
+      "inviteCode": "注册邀请码",
+      "registeredAt": "注册时间",
+      "type": "转化类型",
+      "gross": "消费金额",
+      "reward": "返佣金额",
+      "status": "返佣状态",
+      "settlementChannel": "结算渠道",
+      "settlementRef": "结算单号",
+      "settledAt": "结算时间",
+      "note": "备注",
+      "actions": "操作"
+    },
+    "channels": {
+      "wechatManual": "微信人工结算",
+      "bank": "银行卡",
+      "other": "其他"
+    },
+    "channelLabels": {
+      "wechat_manual": "微信人工结算",
+      "bank": "银行卡",
+      "other": "其他"
+    },
+    "fields": {
+      "channel": "结算渠道",
+      "settlementRef": "结算单号",
+      "note": "备注"
+    },
+    "confirm": {
+      "title": "安全确认",
+      "confirm": "确认",
+      "cancel": "取消",
+      "mfaPrompt": "执行“{action}”前，请输入认证器当前显示的 6 位动态验证码完成二次验证。",
+      "passwordPrompt": "执行“{action}”前，请输入当前管理员密码完成二次验证。",
+      "totpPlaceholder": "输入 6 位动态验证码",
+      "passwordPlaceholder": "输入当前管理员密码"
+    },
+    "messages": {
+      "loadFailed": "加载推广台账失败",
+      "confirmTotpRequired": "请输入 6 位动态验证码",
+      "confirmPasswordRequired": "请输入当前管理员密码",
+      "confirmCancelled": "已取消二次验证",
+      "confirmFailed": "二次验证失败",
+      "confirmPassed": "二次验证通过（5分钟内有效）",
+      "channelRequired": "请选择结算渠道",
+      "settlementRefRequired": "微信人工结算和银行卡结算必须填写结算单号",
+      "optionalNote": "可填写结算备注（选填）",
+      "settlementRefPlaceholder": "可填写微信转账单号、流水号或备注号",
+      "rejectNotePlaceholder": "请填写拒绝原因",
+      "rejectNoteRequired": "请填写拒绝原因",
+      "markPaidSuccess": "返佣台账已标记为已结算",
+      "markPaidFailed": "标记已结算失败",
+      "rejectSuccess": "返佣台账已拒绝",
+      "rejectFailed": "拒绝返佣失败"
+    }
   }
 }

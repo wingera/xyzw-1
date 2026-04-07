@@ -18,14 +18,226 @@ export const initDatabase = () => {
 
   // better-sqlite3 如果文件不存在会自动创建
   db = new Database(env.dbPath);
+  db.pragma("foreign_keys = ON");
 
   // 性能优化设置
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
 
   createSchema();
+  db.pragma("foreign_keys = ON");
 
   return db;
+};
+
+const tableExists = (tableName) => {
+  const normalized = String(tableName || "").trim();
+  if (!normalized) {
+    return false;
+  }
+  const row = db.prepare(
+    `SELECT name
+     FROM sqlite_master
+     WHERE type = 'table'
+       AND name = ?`,
+  ).get(normalized);
+  return Boolean(row?.name);
+};
+
+const normalizeForeignKeyAction = (value) =>
+  String(value || "")
+    .trim()
+    .toUpperCase() || "NO ACTION";
+
+const getForeignKeyList = (tableName) => {
+  const normalized = String(tableName || "").trim();
+  if (!normalized || !tableExists(normalized)) {
+    return [];
+  }
+  return db.prepare(`PRAGMA foreign_key_list(${normalized})`).all().map((row) => ({
+    table: String(row.table || "").trim(),
+    from: String(row.from || "").trim(),
+    to: String(row.to || "").trim(),
+    onDelete: normalizeForeignKeyAction(row.on_delete),
+    onUpdate: normalizeForeignKeyAction(row.on_update),
+  }));
+};
+
+const EXPECTED_REFERRAL_FOREIGN_KEYS = {
+  referral_profiles: [
+    { table: "users", from: "user_id", to: "id", onDelete: "RESTRICT" },
+  ],
+  referral_attributions: [
+    { table: "users", from: "referrer_user_id", to: "id", onDelete: "RESTRICT" },
+    { table: "users", from: "referred_user_id", to: "id", onDelete: "RESTRICT" },
+    { table: "referral_profiles", from: "referral_profile_id", to: "id", onDelete: "RESTRICT" },
+    { table: "invite_codes", from: "invite_code_id", to: "id", onDelete: "SET NULL" },
+  ],
+  referral_conversions: [
+    { table: "users", from: "referrer_user_id", to: "id", onDelete: "RESTRICT" },
+    { table: "users", from: "referred_user_id", to: "id", onDelete: "RESTRICT" },
+    { table: "referral_attributions", from: "referral_attribution_id", to: "id", onDelete: "RESTRICT" },
+    { table: "activation_codes", from: "activation_code_id", to: "id", onDelete: "RESTRICT" },
+    { table: "token_activation_bindings", from: "token_activation_id", to: "id", onDelete: "SET NULL" },
+    { table: "users", from: "paid_by", to: "id", onDelete: "SET NULL" },
+  ],
+};
+
+const matchesExpectedForeignKeys = (tableName, expectedList) => {
+  const actual = getForeignKeyList(tableName);
+  if (actual.length !== expectedList.length) {
+    return false;
+  }
+  return expectedList.every((expected) =>
+    actual.some((row) =>
+      row.table === expected.table
+      && row.from === expected.from
+      && row.to === expected.to
+      && row.onDelete === expected.onDelete));
+};
+
+const needsReferralForeignKeyRebuild = () =>
+  Object.entries(EXPECTED_REFERRAL_FOREIGN_KEYS).some(([tableName, expectedList]) =>
+    tableExists(tableName) && !matchesExpectedForeignKeys(tableName, expectedList));
+
+const ensureReferralIndexes = () => {
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_profiles_user_id ON referral_profiles(user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_profiles_referral_code ON referral_profiles(referral_code);
+    CREATE INDEX IF NOT EXISTS idx_referral_attributions_referrer_user_id ON referral_attributions(referrer_user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_attributions_referred_user_id ON referral_attributions(referred_user_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_attributions_referral_profile_id ON referral_attributions(referral_profile_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_attributions_registered_at ON referral_attributions(registered_at);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_referrer_user_id ON referral_conversions(referrer_user_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_referred_user_id ON referral_conversions(referred_user_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_referral_attribution_id ON referral_conversions(referral_attribution_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_activation_code_id ON referral_conversions(activation_code_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_reward_status ON referral_conversions(reward_status);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_created_at ON referral_conversions(created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_settlements_conversion_id ON referral_settlements(conversion_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_settlements_settled_at ON referral_settlements(settled_at);
+    CREATE INDEX IF NOT EXISTS idx_referral_settlements_settled_by ON referral_settlements(settled_by);
+  `);
+};
+
+const rebuildReferralTablesWithSafeForeignKeys = () => {
+  const foreignKeysWereEnabled = Number(db.pragma("foreign_keys", { simple: true }) || 0) === 1;
+  db.pragma("foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      db.exec(`
+        DROP TABLE IF EXISTS referral_conversions_new;
+        DROP TABLE IF EXISTS referral_attributions_new;
+        DROP TABLE IF EXISTS referral_profiles_new;
+
+        CREATE TABLE referral_profiles_new (
+          id TEXT PRIMARY KEY,
+          user_id TEXT UNIQUE NOT NULL,
+          referral_code TEXT UNIQUE NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          generated_at TEXT NOT NULL,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT
+        );
+
+        INSERT INTO referral_profiles_new (
+          id, user_id, referral_code, created_at, updated_at, generated_at
+        )
+        SELECT
+          id, user_id, referral_code, created_at, updated_at, generated_at
+        FROM referral_profiles;
+
+        CREATE TABLE referral_attributions_new (
+          id TEXT PRIMARY KEY,
+          referrer_user_id TEXT NOT NULL,
+          referred_user_id TEXT UNIQUE NOT NULL,
+          referral_profile_id TEXT NOT NULL,
+          referral_code_snapshot TEXT NOT NULL,
+          invite_code_id TEXT,
+          invite_code_mask TEXT,
+          registered_at TEXT NOT NULL,
+          register_ip TEXT,
+          register_user_agent TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (referrer_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+          FOREIGN KEY (referred_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+          FOREIGN KEY (referral_profile_id) REFERENCES referral_profiles_new(id) ON DELETE RESTRICT,
+          FOREIGN KEY (invite_code_id) REFERENCES invite_codes(id) ON DELETE SET NULL
+        );
+
+        INSERT INTO referral_attributions_new (
+          id, referrer_user_id, referred_user_id, referral_profile_id,
+          referral_code_snapshot, invite_code_id, invite_code_mask,
+          registered_at, register_ip, register_user_agent, created_at, updated_at
+        )
+        SELECT
+          id, referrer_user_id, referred_user_id, referral_profile_id,
+          referral_code_snapshot, invite_code_id, invite_code_mask,
+          registered_at, register_ip, register_user_agent, created_at, updated_at
+        FROM referral_attributions;
+
+        CREATE TABLE referral_conversions_new (
+          id TEXT PRIMARY KEY,
+          referrer_user_id TEXT NOT NULL,
+          referred_user_id TEXT NOT NULL,
+          referral_attribution_id TEXT NOT NULL,
+          activation_code_id TEXT NOT NULL,
+          token_activation_id TEXT,
+          conversion_type TEXT NOT NULL,
+          feature_scope TEXT NOT NULL,
+          duration_months INTEGER NOT NULL,
+          gross_amount_cents INTEGER NOT NULL DEFAULT 0,
+          reward_rate_bps INTEGER NOT NULL DEFAULT 0,
+          reward_amount_cents INTEGER NOT NULL DEFAULT 0,
+          reward_status TEXT NOT NULL DEFAULT 'pending',
+          note TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          paid_at TEXT,
+          paid_by TEXT,
+          FOREIGN KEY (referrer_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+          FOREIGN KEY (referred_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+          FOREIGN KEY (referral_attribution_id) REFERENCES referral_attributions_new(id) ON DELETE RESTRICT,
+          FOREIGN KEY (activation_code_id) REFERENCES activation_codes(id) ON DELETE RESTRICT,
+          FOREIGN KEY (token_activation_id) REFERENCES token_activation_bindings(id) ON DELETE SET NULL,
+          FOREIGN KEY (paid_by) REFERENCES users(id) ON DELETE SET NULL
+        );
+
+        INSERT INTO referral_conversions_new (
+          id, referrer_user_id, referred_user_id, referral_attribution_id,
+          activation_code_id, token_activation_id, conversion_type, feature_scope,
+          duration_months, gross_amount_cents, reward_rate_bps, reward_amount_cents,
+          reward_status, note, created_at, updated_at, paid_at, paid_by
+        )
+        SELECT
+          id, referrer_user_id, referred_user_id, referral_attribution_id,
+          activation_code_id, token_activation_id, conversion_type, feature_scope,
+          duration_months, gross_amount_cents, reward_rate_bps, reward_amount_cents,
+          reward_status, note, created_at, updated_at, paid_at, paid_by
+        FROM referral_conversions;
+
+        DROP TABLE referral_conversions;
+        DROP TABLE referral_attributions;
+        DROP TABLE referral_profiles;
+
+        ALTER TABLE referral_profiles_new RENAME TO referral_profiles;
+        ALTER TABLE referral_attributions_new RENAME TO referral_attributions;
+        ALTER TABLE referral_conversions_new RENAME TO referral_conversions;
+      `);
+    })();
+  } finally {
+    if (foreignKeysWereEnabled) {
+      db.pragma("foreign_keys = ON");
+    }
+  }
+
+  const foreignKeyViolations = db.prepare("PRAGMA foreign_key_check").all();
+  if (foreignKeyViolations.length > 0) {
+    throw new Error("Referral foreign key rebuild failed integrity check");
+  }
+
+  ensureReferralIndexes();
 };
 
 const createSchema = () => {
@@ -376,6 +588,8 @@ const createSchema = () => {
       created_by TEXT NOT NULL,
       feature_scope TEXT NOT NULL DEFAULT 'full',
       duration_months INTEGER NOT NULL,
+      sale_amount_cents INTEGER NOT NULL DEFAULT 0,
+      sale_currency TEXT NOT NULL DEFAULT 'CNY',
       used_by TEXT,
       used_at TEXT,
       bound_token_id TEXT,
@@ -407,6 +621,96 @@ const createSchema = () => {
       UNIQUE(token_id, game_account_id),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (activation_code_id) REFERENCES activation_codes(id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS referral_profiles (
+      id TEXT PRIMARY KEY,
+      user_id TEXT UNIQUE NOT NULL,
+      referral_code TEXT UNIQUE NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      generated_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS referral_attributions (
+      id TEXT PRIMARY KEY,
+      referrer_user_id TEXT NOT NULL,
+      referred_user_id TEXT UNIQUE NOT NULL,
+      referral_profile_id TEXT NOT NULL,
+      referral_code_snapshot TEXT NOT NULL,
+      invite_code_id TEXT,
+      invite_code_mask TEXT,
+      registered_at TEXT NOT NULL,
+      register_ip TEXT,
+      register_user_agent TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (referrer_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+      FOREIGN KEY (referred_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+      FOREIGN KEY (referral_profile_id) REFERENCES referral_profiles(id) ON DELETE RESTRICT,
+      FOREIGN KEY (invite_code_id) REFERENCES invite_codes(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS referral_conversions (
+      id TEXT PRIMARY KEY,
+      referrer_user_id TEXT NOT NULL,
+      referred_user_id TEXT NOT NULL,
+      referral_attribution_id TEXT NOT NULL,
+      activation_code_id TEXT NOT NULL,
+      token_activation_id TEXT,
+      conversion_type TEXT NOT NULL,
+      feature_scope TEXT NOT NULL,
+      duration_months INTEGER NOT NULL,
+      gross_amount_cents INTEGER NOT NULL DEFAULT 0,
+      reward_rate_bps INTEGER NOT NULL DEFAULT 0,
+      reward_amount_cents INTEGER NOT NULL DEFAULT 0,
+      reward_status TEXT NOT NULL DEFAULT 'pending',
+      note TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      paid_at TEXT,
+      paid_by TEXT,
+      FOREIGN KEY (referrer_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+      FOREIGN KEY (referred_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+      FOREIGN KEY (referral_attribution_id) REFERENCES referral_attributions(id) ON DELETE RESTRICT,
+      FOREIGN KEY (activation_code_id) REFERENCES activation_codes(id) ON DELETE RESTRICT,
+      FOREIGN KEY (token_activation_id) REFERENCES token_activation_bindings(id) ON DELETE SET NULL,
+      FOREIGN KEY (paid_by) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS referral_settlements (
+      id TEXT PRIMARY KEY,
+      conversion_id TEXT NOT NULL UNIQUE,
+      amount_cents INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'CNY',
+      channel TEXT NOT NULL,
+      settlement_ref TEXT,
+      note TEXT,
+      settled_by TEXT,
+      settled_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (conversion_id) REFERENCES referral_conversions(id) ON DELETE RESTRICT,
+      FOREIGN KEY (settled_by) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS wechat_contacts (
+      id TEXT PRIMARY KEY,
+      slug TEXT UNIQUE NOT NULL,
+      title TEXT NOT NULL,
+      subtitle TEXT,
+      contact_type TEXT NOT NULL,
+      target_url TEXT,
+      wechat_id TEXT,
+      qr_image_data_url TEXT,
+      show_in_pricing INTEGER NOT NULL DEFAULT 1,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 100,
+      created_by TEXT,
+      updated_by TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_roles_user_id ON roles(user_id);
@@ -450,6 +754,25 @@ const createSchema = () => {
     CREATE INDEX IF NOT EXISTS idx_token_activation_bindings_token_id ON token_activation_bindings(token_id);
     CREATE INDEX IF NOT EXISTS idx_token_activation_bindings_game_account_id ON token_activation_bindings(game_account_id);
     CREATE INDEX IF NOT EXISTS idx_token_activation_bindings_expires_at ON token_activation_bindings(expires_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_profiles_user_id ON referral_profiles(user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_profiles_referral_code ON referral_profiles(referral_code);
+    CREATE INDEX IF NOT EXISTS idx_referral_attributions_referrer_user_id ON referral_attributions(referrer_user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_attributions_referred_user_id ON referral_attributions(referred_user_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_attributions_referral_profile_id ON referral_attributions(referral_profile_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_attributions_registered_at ON referral_attributions(registered_at);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_referrer_user_id ON referral_conversions(referrer_user_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_referred_user_id ON referral_conversions(referred_user_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_referral_attribution_id ON referral_conversions(referral_attribution_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_activation_code_id ON referral_conversions(activation_code_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_reward_status ON referral_conversions(reward_status);
+    CREATE INDEX IF NOT EXISTS idx_referral_conversions_created_at ON referral_conversions(created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_settlements_conversion_id ON referral_settlements(conversion_id);
+    CREATE INDEX IF NOT EXISTS idx_referral_settlements_settled_at ON referral_settlements(settled_at);
+    CREATE INDEX IF NOT EXISTS idx_referral_settlements_settled_by ON referral_settlements(settled_by);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_wechat_contacts_slug ON wechat_contacts(slug);
+    CREATE INDEX IF NOT EXISTS idx_wechat_contacts_is_active ON wechat_contacts(is_active);
+    CREATE INDEX IF NOT EXISTS idx_wechat_contacts_show_in_pricing ON wechat_contacts(show_in_pricing);
+    CREATE INDEX IF NOT EXISTS idx_wechat_contacts_sort_order ON wechat_contacts(sort_order);
   `);
 
   // 兼容旧库：补充管理员字段。
@@ -598,6 +921,16 @@ const createSchema = () => {
     // ignore: column already exists
   }
   try {
+    db.exec(`ALTER TABLE activation_codes ADD COLUMN sale_amount_cents INTEGER NOT NULL DEFAULT 0;`);
+  } catch {
+    // ignore: column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE activation_codes ADD COLUMN sale_currency TEXT NOT NULL DEFAULT 'CNY';`);
+  } catch {
+    // ignore: column already exists
+  }
+  try {
     db.exec(`ALTER TABLE token_activation_bindings ADD COLUMN role_name TEXT;`);
   } catch {
     // ignore: column already exists
@@ -687,6 +1020,12 @@ const createSchema = () => {
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_activation_codes_code_hmac_unique ON activation_codes(code_hmac);`);
   } catch {
     // ignore
+  }
+
+  if (needsReferralForeignKeyRebuild()) {
+    rebuildReferralTablesWithSafeForeignKeys();
+  } else {
+    ensureReferralIndexes();
   }
 
   backfillCodeSecrets({

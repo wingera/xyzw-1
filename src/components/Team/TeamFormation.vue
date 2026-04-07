@@ -67,7 +67,6 @@
                   v-if="hero.avatar"
                   class="hero-avatar"
                   :alt="hero.name"
-                  :class="{ 'lusu-avatar-rotate': isLusuHero(hero.id) }"
                   :src="hero.avatar"
                 >
                 <div v-else class="hero-placeholder">
@@ -89,7 +88,6 @@
                   v-if="hero.avatar"
                   class="hero-avatar"
                   :alt="hero.name"
-                  :class="{ 'lusu-avatar-rotate': isLusuHero(hero.id) }"
                   :src="hero.avatar"
                 >
                 <div v-else class="hero-placeholder">
@@ -125,8 +123,6 @@ const loading = ref(false);
 const switching = ref(false);
 const currentTeam = ref(1);
 const availableTeams = ref<number[]>([1, 2, 3, 4, 5, 6]);
-
-const isLusuHero = (heroId: number | string) => Number(heroId) === 121;
 
 const wsStatus = computed(() => {
   if (!tokenStore.selectedToken)
@@ -559,10 +555,6 @@ watch(
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
-
-.lusu-avatar-rotate {
-  transform: rotate(90deg);
 }
 
 .hero-placeholder {

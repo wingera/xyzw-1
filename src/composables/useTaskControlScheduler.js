@@ -4,6 +4,7 @@ import {
   getJsonPreference,
   setJsonPreference,
 } from "@/services/preferences/localPreferences";
+import { persistQuietWindowSetting } from "@/composables/taskControlQuietWindowPersistence";
 
 const QUIET_WINDOW_PREF_KEY = "task_control_quiet_windows_v1";
 
@@ -94,19 +95,31 @@ export function useTaskControlScheduler({
     } catch {}
   };
 
-  const saveQuietWindowSetting = async () => {
-    const payload = { enabled: !!quietWindowsEnabled.value };
-    try {
-      await api.user.setPreference(QUIET_WINDOW_PREF_KEY, payload);
-    } catch {}
-    try {
-      setJsonPreference(QUIET_WINDOW_PREF_KEY, payload);
-    } catch {}
+  const saveQuietWindowSetting = async (enabled) => {
+    await persistQuietWindowSetting({
+      enabled,
+      saveRemote: (payload) => api.user.setPreference(QUIET_WINDOW_PREF_KEY, payload),
+      saveLocal: (payload) => setJsonPreference(QUIET_WINDOW_PREF_KEY, payload),
+    });
   };
 
   const setQuietWindowsEnabled = async (value) => {
-    quietWindowsEnabled.value = !!value;
-    await saveQuietWindowSetting();
+    const previousValue = !!quietWindowsEnabled.value;
+    const nextValue = !!value;
+    quietWindowsEnabled.value = nextValue;
+    try {
+      await saveQuietWindowSetting(nextValue);
+    } catch (error) {
+      quietWindowsEnabled.value = previousValue;
+      appendLog(
+        { title: t("taskControl.common.system") },
+        t("taskControl.messages.quietWindowSaveFailed", {
+          error: error?.message || t("taskControl.messages.executionFailed"),
+        }),
+        "warning",
+      );
+      return;
+    }
     if (quietWindowsEnabled.value && isInQuietWindow(new Date())) {
       const closed = enforceOfflineForQuietWindow();
       appendLog(
@@ -115,6 +128,14 @@ export function useTaskControlScheduler({
           time: getQuietWindowText(new Date()),
           count: closed,
         }),
+        "info",
+      );
+    } else {
+      appendLog(
+        { title: t("taskControl.common.system") },
+        quietWindowsEnabled.value
+          ? t("taskControl.messages.quietWindowEnabled")
+          : t("taskControl.messages.quietWindowDisabled"),
         "info",
       );
     }

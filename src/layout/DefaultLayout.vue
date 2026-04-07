@@ -44,6 +44,16 @@
             <span class="app-shell__status-dot" :class="`is-${selectedTokenStatus}`"></span>
             <span>{{ selectedTokenStatusText }}</span>
           </div>
+          <div class="app-shell__version-list">
+            <div class="app-shell__version-row">
+              <span class="app-shell__version-label">前端版本</span>
+              <strong>{{ frontendVersionText }}</strong>
+            </div>
+            <div class="app-shell__version-row">
+              <span class="app-shell__version-label">后端版本</span>
+              <strong>{{ backendVersionText }}</strong>
+            </div>
+          </div>
         </div>
       </div>
     </n-layout-sider>
@@ -188,6 +198,7 @@
 </template>
 
 <script setup>
+import packageInfo from "../../package.json";
 import { selectedToken, useTokenStore } from "@/stores/tokenStore";
 import { useAuthStore } from "@/stores/auth";
 import ThemeToggle from "@/components/Common/ThemeToggle.vue";
@@ -239,9 +250,27 @@ const canAccessGameFeatures = computed(() => hasGameFeatureAccess(authStore.user
 const canOpenAdminCenter = computed(() => canAccessAdminCenter(authStore.user));
 const canOpenWorkbenchFeatures = computed(() => tokenStore.hasUsableWorkbenchToken);
 const unreadBadgeValue = computed(() => (unreadCount.value > 99 ? "99+" : unreadCount.value));
+const backendBuildInfo = ref(null);
+const hasLoadedBuildInfo = ref(false);
 const isSiderCollapsed = ref(
   typeof window !== "undefined" && window.localStorage.getItem("ui:sider-collapsed") === "true",
 );
+const frontendVersionText = computed(() => {
+  const version = String(
+    import.meta.env.VITE_APP_VERSION
+    || packageInfo?.version
+    || backendBuildInfo.value?.appVersion
+    || "",
+  ).trim();
+  return version ? `v${version}` : "未提供";
+});
+const backendVersionText = computed(() => {
+  const version = String(backendBuildInfo.value?.backendVersion || "").trim();
+  if (version) {
+    return `v${version}`;
+  }
+  return hasLoadedBuildInfo.value ? "未提供" : "读取中";
+});
 
 const selectedTokenStatus = computed(() => {
   if (!selectedToken.value) {
@@ -271,11 +300,13 @@ const workspaceMenuOptions = computed(() => {
   const options = [
     { label: "控制台", key: "/admin/dashboard", icon: renderIcon(Home) },
     { label: "Token 管理", key: "/tokens", icon: renderIcon(PersonCircle) },
+    { label: "推广中心", key: "/admin/referral-center", icon: renderIcon(Megaphone) },
   ];
 
   if (canOpenWorkbenchFeatures.value) {
     options.push(
       { label: "游戏功能", key: "/admin/game-features", icon: renderIcon(Cube) },
+      { label: "阵容助手", key: "/admin/lineup-assistant", icon: renderIcon(Cube) },
       { label: "任务控制", key: "/admin/task-control", icon: renderIcon(Settings) },
     );
   }
@@ -300,6 +331,8 @@ const adminMenuOptions = [
   { label: "账号管理", key: "/admin/admin-users", icon: renderIcon(People) },
   { label: "邀请码管理", key: "/admin/admin-invites", icon: renderIcon(People) },
   { label: "激活码管理", key: "/admin/activation-codes", icon: renderIcon(People) },
+  { label: "推广邀请管理", key: "/admin/referrals", icon: renderIcon(Megaphone) },
+  { label: "微信联系配置", key: "/admin/wechat-contacts", icon: renderIcon(People) },
   { label: "工单管理", key: "/admin/feedback-tickets", icon: renderIcon(Receipt) },
   { label: "后端任务日志", key: "/admin/task-control-logs", icon: renderIcon(Receipt) },
   { label: "更新日志广播", key: "/admin/changelog-broadcast", icon: renderIcon(Receipt) },
@@ -464,6 +497,19 @@ const fetchNotifications = async () => {
   }
 };
 
+const fetchBuildInfo = async () => {
+  try {
+    const res = await api.system.getVersion();
+    if (res?.success && res?.data && typeof res.data === "object") {
+      backendBuildInfo.value = res.data;
+    }
+  } catch {
+    backendBuildInfo.value = null;
+  } finally {
+    hasLoadedBuildInfo.value = true;
+  }
+};
+
 const handleNotifyPopover = (show) => {
   if (show) {
     fetchNotifications();
@@ -586,6 +632,7 @@ watch(
 );
 
 onMounted(() => {
+  fetchBuildInfo();
   if (authStore.isAuthenticated) {
     maybeShowMfaSuggestion();
     fetchNotifications();
@@ -714,6 +761,33 @@ onUnmounted(() => {
   gap: 8px;
   color: var(--text-secondary);
   font-size: 13px;
+}
+
+.app-shell__version-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(63, 119, 173, 0.12);
+}
+
+.app-shell__version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.app-shell__version-label {
+  color: var(--text-tertiary);
+}
+
+.app-shell__version-row strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .app-shell__status-dot {

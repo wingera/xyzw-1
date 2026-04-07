@@ -1,3 +1,111 @@
+const inferArenaRecordWinState = (record) => {
+  if (typeof record?.isWin === "boolean")
+    return record.isWin;
+  const scoreDelta = Number(record?.scoreDelta);
+  if (Number.isFinite(scoreDelta) && scoreDelta !== 0)
+    return scoreDelta > 0;
+  return null;
+};
+
+const appendArenaRecordStats = (map, key, isWin) => {
+  const normalizedKey = String(key || "").trim();
+  if (!normalizedKey)
+    return;
+  const prev = map.get(normalizedKey) || { wins: 0, total: 0 };
+  map.set(normalizedKey, {
+    wins: prev.wins + (isWin ? 1 : 0),
+    total: prev.total + 1,
+  });
+};
+
+const buildArenaRecordStatsLookups = (records = []) => {
+  const byRoleId = new Map();
+  const byName = new Map();
+  for (const record of records || []) {
+    const isWin = inferArenaRecordWinState(record);
+    if (isWin === null)
+      continue;
+    appendArenaRecordStats(byRoleId, record?.roleId, isWin);
+    appendArenaRecordStats(byName, record?.name, isWin);
+  }
+  return { byRoleId, byName };
+};
+
+const resolveArenaTargetStats = (item, targetWinStats = {}, recordLookups = null) => {
+  const roleIdKey = String(item?.id || "").trim();
+  const nameKey = String(item?.name || "").trim();
+  const recordStats
+    = recordLookups?.byRoleId?.get(roleIdKey)
+      || recordLookups?.byName?.get(nameKey)
+      || null;
+  const stats = recordStats?.total > 0 ? recordStats : targetWinStats?.[roleIdKey];
+  const total = Math.max(0, Number(stats?.total || 0));
+  const wins = Math.max(0, Number(stats?.wins || 0));
+  const known = total > 0;
+  const rate = known ? (wins / total) * 100 : -1;
+  return { known, wins, total, rate };
+};
+
+export const sortArenaTargetsByWinRatePreference = (
+  available = [],
+  targetWinStats = {},
+  preferredWinRate = null,
+  arenaRecords = [],
+) => {
+
+  const hasExplicitPreferredWinRate = !(
+    preferredWinRate === null
+    || preferredWinRate === undefined
+    || String(preferredWinRate).trim() === ""
+  );
+  const numericPreferredWinRate = Number(preferredWinRate);
+  const hasPreferredWinRate
+    = hasExplicitPreferredWinRate
+      && Number.isFinite(numericPreferredWinRate)
+      && numericPreferredWinRate >= 0
+      && numericPreferredWinRate <= 100;
+  const recordLookups = buildArenaRecordStatsLookups(arenaRecords);
+  const fallbackOrder = new Map(
+    (available || []).map((item, index) => [String(item?.id || ""), index]),
+  );
+
+  const resolveStatsMeta = (item) => {
+    const stats = resolveArenaTargetStats(item, targetWinStats, recordLookups);
+    const meetsThreshold = hasPreferredWinRate && stats.known && stats.rate >= numericPreferredWinRate;
+    const group = hasPreferredWinRate
+      ? meetsThreshold
+        ? 0
+        : stats.known
+          ? 2
+          : 1
+      : stats.known
+        ? 0
+        : 1;
+    return {
+      ...stats,
+      group,
+      meetsThreshold,
+      fallbackIndex: fallbackOrder.get(String(item?.id || "")) ?? Number.MAX_SAFE_INTEGER,
+    };
+  };
+
+  return [...available].sort((a, b) => {
+    const metaA = resolveStatsMeta(a);
+    const metaB = resolveStatsMeta(b);
+
+    if (metaA.group !== metaB.group)
+      return metaA.group - metaB.group;
+
+    if (metaA.group === 0 && metaA.known && metaB.known) {
+      if (metaA.rate !== metaB.rate)
+        return metaB.rate - metaA.rate;
+      if (metaA.total !== metaB.total)
+        return metaB.total - metaA.total;
+    }
+    return metaA.fallbackIndex - metaB.fallbackIndex;
+  });
+};
+
 export function useArenaPvpTargeting({
   tokenStore,
   t,
@@ -5,6 +113,8 @@ export function useArenaPvpTargeting({
   myRoleId,
   rankList,
   targetWinStats,
+  preferredWinRate,
+  arenaRecords,
   arenaTargetProfileCache,
   saveTargetWinStats,
   getLineupType,
@@ -433,39 +543,36 @@ export function useArenaPvpTargeting({
       return { target: null, skipped, allLvZhao: true, prioritizedTop: [] };
     }
 
-    const sorted = [...available].sort((a, b) => {
-      const statsA = targetWinStats.value[a.id];
-      const statsB = targetWinStats.value[b.id];
-
-      const knownA = !!statsA && Number(statsA.total) > 0;
-      const knownB = !!statsB && Number(statsB.total) > 0;
-      if (knownA !== knownB)
-        return knownA ? -1 : 1;
-
-      const rateA
-        = knownA && Number(statsA.total) > 0
-          ? Number(statsA.wins || 0) / Number(statsA.total || 1)
-          : -1;
-      const rateB
-        = knownB && Number(statsB.total) > 0
-          ? Number(statsB.wins || 0) / Number(statsB.total || 1)
-          : -1;
-      if (rateA !== rateB)
-        return rateB - rateA;
-
-      const totalA = knownA ? Number(statsA.total || 0) : 0;
-      const totalB = knownB ? Number(statsB.total || 0) : 0;
-      if (totalA !== totalB)
-        return totalB - totalA;
-
-      return 0;
-    });
+    const sorted = sortArenaTargetsByWinRatePreference(
+      available,
+      targetWinStats.value,
+      preferredWinRate?.value,
+      arenaRecords?.value,
+    );
+    const recordLookups = buildArenaRecordStatsLookups(arenaRecords?.value || []);
 
     const prioritizedTop = sorted
       .map((item) => {
-        const stats = targetWinStats.value[item.id];
-        if (!stats || Number(stats.total) <= 0)
+        const stats = resolveArenaTargetStats(
+          item,
+          targetWinStats.value,
+          recordLookups,
+        );
+        if (!stats.known || Number(stats.total) <= 0)
           return null;
+        const hasThreshold = !(
+          preferredWinRate?.value === null
+          || preferredWinRate?.value === undefined
+          || String(preferredWinRate.value).trim() === ""
+        );
+        const numericThreshold = Number(preferredWinRate?.value);
+        if (
+          hasThreshold
+          && Number.isFinite(numericThreshold)
+          && stats.rate < numericThreshold
+        ) {
+          return null;
+        }
         const total = Number(stats.total || 0);
         const wins = Number(stats.wins || 0);
         const rate = total > 0 ? ((wins / total) * 100).toFixed(0) : "0";

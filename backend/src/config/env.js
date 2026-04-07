@@ -156,11 +156,17 @@ const rawActivationCodePepper = String(
 const rawPasswordResetCodePepper = String(
   process.env.PASSWORD_RESET_CODE_PEPPER || "",
 ).trim();
+const rawReferralCookieSecret = String(
+  process.env.REFERRAL_COOKIE_SECRET || "",
+).trim();
 const nodeEnv = process.env.NODE_ENV || "development";
 const isProduction = nodeEnv === "production";
 const defaultCorsOrigins = ["http://localhost:3000"];
 const rawTrustedImportApiHosts = String(
   process.env.TRUSTED_IMPORT_API_HOSTS || "",
+);
+const rawWechatContactExternalUrlAllowlist = String(
+  process.env.WECHAT_CONTACT_EXTERNAL_URL_ALLOWLIST || "",
 );
 const trustedImportApiHostsExplicitlySet =
   rawTrustedImportApiHosts.trim().length > 0;
@@ -181,6 +187,9 @@ const cspConnectSrc = String(process.env.CSP_CONNECT_SRC || "")
   .map((item) => item.trim())
   .filter(Boolean);
 const trustedImportApiHosts = parseHostPatterns(rawTrustedImportApiHosts);
+const wechatContactExternalUrlAllowlist = parseHostPatterns(
+  rawWechatContactExternalUrlAllowlist,
+);
 const dbWriteSafetyParamsTables = parseCsv(
   process.env.DB_WRITE_SAFETY_PARAMS_TABLES,
 ).map((item) => item.toLowerCase());
@@ -335,6 +344,11 @@ export const env = {
   inviteCodePepper: rawInviteCodePepper,
   activationCodePepper: rawActivationCodePepper,
   passwordResetCodePepper: rawPasswordResetCodePepper,
+  referralCookieSecret: rawReferralCookieSecret,
+  allowLegacyReferralBodyFallback: parseBoolean(
+    process.env.ALLOW_LEGACY_REFERRAL_BODY_FALLBACK,
+    false,
+  ),
   corsOrigins: corsOrigins.length > 0 ? corsOrigins : defaultCorsOrigins,
   corsOriginsExplicitlySet,
   protectedAdminIdentities,
@@ -440,6 +454,7 @@ export const env = {
     trustedImportApiHosts.length > 0
       ? trustedImportApiHosts
       : defaultTrustedImportApiHosts,
+  wechatContactExternalUrlAllowlist,
   cspConnectSrc:
     cspConnectSrc.length > 0 ? cspConnectSrc : defaultCspConnectSrc,
   wechatProxyHortorLoginGuestOnly: parseBoolean(

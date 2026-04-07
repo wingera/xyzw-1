@@ -98,6 +98,7 @@ export function useArenaPvpBattleActions({
       }
 
       void enrichRankListLineups(tokenId, normalized);
+      await syncArenaBattleRecordsFromGame({ silent: true }).catch(() => {});
 
       if (!silent)
         message.success(t("arenaPvpCard.messages.refreshSuccess"));
@@ -219,6 +220,7 @@ export function useArenaPvpBattleActions({
             { refresh: true },
             8000,
           );
+          await syncArenaBattleRecordsFromGame({ silent: true }).catch(() => {});
           decision = await selectArenaTargetWithRules(tokenId, targets);
 
           for (const skippedTarget of decision.skipped) {

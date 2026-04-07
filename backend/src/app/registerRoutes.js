@@ -11,6 +11,10 @@ import notificationRoutes from "../routes/notifications.js";
 import wechatProxyRoutes from "../routes/wechatProxy.js";
 import tokenImportProxyRoutes from "../routes/tokenImportProxy.js";
 import tokenActivationRoutes from "../routes/tokenActivations.js";
+import publicWechatContactsRoutes from "../routes/publicWechatContacts.js";
+import adminWechatContactsRoutes from "../routes/adminWechatContacts.js";
+import publicReferralsRoutes from "../routes/publicReferrals.js";
+import adminReferralsRoutes from "../routes/adminReferrals.js";
 import { publicBuildInfo } from "../lib/buildInfo.js";
 import { createUserRoutes } from "./userRoutes.js";
 
@@ -42,6 +46,10 @@ export function registerRoutes(app) {
 
   app.use("/api/v1/auth", authRoutes);
   app.use("/api/v1/admin", adminRoutes);
+  app.use("/api/v1/admin", adminWechatContactsRoutes);
+  app.use("/api/v1/admin", adminReferralsRoutes);
+  app.use("/api/v1", publicWechatContactsRoutes);
+  app.use("/api/v1", publicReferralsRoutes);
   app.use("/api/v1", wechatProxyRoutes);
   app.use("/api/v1", tokenImportProxyRoutes);
   app.use("/api/v1", roleRoutes);

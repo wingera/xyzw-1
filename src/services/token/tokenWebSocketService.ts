@@ -149,11 +149,9 @@ export const createWebSocketConnectionById = async ({
       updateCrossTabConnectionState(tokenId, "connected");
       releaseConnectionLock(tokenId, "connect");
       clearChatCache();
-      try {
-        wsClient.send("role_getroleinfo");
-      } catch (error) {
+      void wsClient.debounceSend("role_getroleinfo").catch((error: any) => {
         logger.warn(`初始化角色信息请求失败 [${tokenId}]`, error);
-      }
+      });
     };
 
     wsClient.onDisconnect = async (event) => {

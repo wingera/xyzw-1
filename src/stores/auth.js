@@ -41,9 +41,10 @@ export const useAuthStore = defineStore("auth", () => {
 
   const ensureCsrfToken = async () => {
     try {
-      await api.auth.ensureCsrf();
+      return await api.auth.ensureCsrf();
     } catch {
       // ignore, request interceptor will attach token if cookie exists
+      return null;
     }
   };
 
@@ -169,9 +170,16 @@ export const useAuthStore = defineStore("auth", () => {
         success: !!res.success,
         message: res.message || (res.success ? "注册成功" : "注册失败"),
         data: res.data || null,
+        code: String(res?.code || ""),
+        status: 200,
       };
     } catch (error) {
-      return { success: false, message: error.message || "注册失败" };
+      return {
+        success: false,
+        message: error.message || "注册失败",
+        code: String(error?.code || ""),
+        status: Number(error?.status) || 0,
+      };
     } finally {
       isLoading.value = false;
     }
@@ -214,7 +222,10 @@ export const useAuthStore = defineStore("auth", () => {
 
   const refreshAccessToken = async () => {
     try {
-      await ensureCsrfToken();
+      const csrfState = await ensureCsrfToken();
+      if (csrfState?.success && csrfState?.data?.hasRefreshTokenCookie === false) {
+        return false;
+      }
       const refreshed = await api.auth.refreshToken();
       if (!refreshed?.success) {
         return false;

@@ -14,3 +14,8 @@ export { binDownloadRepository } from "./binDownloadRepository.js";
 export { securityEventRepository } from "./securityEventRepository.js";
 export { activationCodeRepository } from "./activationCodeRepository.js";
 export { tokenActivationRepository } from "./tokenActivationRepository.js";
+export { wechatContactRepository } from "./wechatContactRepository.js";
+export { referralProfileRepository } from "./referralProfileRepository.js";
+export { referralAttributionRepository } from "./referralAttributionRepository.js";
+export { referralConversionRepository } from "./referralConversionRepository.js";
+export { referralSettlementRepository } from "./referralSettlementRepository.js";

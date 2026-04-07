@@ -3,7 +3,9 @@ import type { XyzwWebSocketClient } from "@/utils/xyzwWebSocket";
 import { EventEmitter } from "event-emitter3";
 
 import { AckPlugin } from "./ack.ts";
+import { ActivityPlugin } from "./activity.ts";
 import { ChatPlugin } from "./chat.ts";
+import { ClockPlugin } from "./clock.ts";
 import { HangupPlugin } from "./hangup.ts";
 import { LegionPlugin } from "./legion.ts";
 import { RolePlugin } from "./role.ts";
@@ -59,6 +61,8 @@ const evmInst: EVM = {
 };
 
 AckPlugin(evmInst);
+ActivityPlugin(evmInst);
+ClockPlugin(evmInst);
 
 RolePlugin(evmInst);
 

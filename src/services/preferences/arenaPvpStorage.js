@@ -13,6 +13,8 @@ export const getArenaManualLineupStorageKey = (tokenId) =>
   `arena_pvp_manual_lineups_v1:${tokenId || "unknown"}`;
 export const getArenaSkipLineupsStorageKey = (tokenId) =>
   `arena_pvp_skip_lineups_v1:${tokenId || "unknown"}`;
+export const getArenaPreferredWinRateStorageKey = (tokenId) =>
+  `arena_pvp_preferred_win_rate_v1:${tokenId || "unknown"}`;
 export const getArenaSyncPrefKeyByScope = (scopeId) =>
   `arena_pvp_sync_v1:${scopeId || "unknown"}`;
 
@@ -93,4 +95,11 @@ export const loadArenaSkipLineupsFromLocal = (tokenId) =>
 
 export const saveArenaSkipLineupsToLocal = (tokenId, value) => {
   setJsonPreference(getArenaSkipLineupsStorageKey(tokenId), value);
+};
+
+export const loadArenaPreferredWinRateFromLocal = (tokenId) =>
+  getJsonPreference(getArenaPreferredWinRateStorageKey(tokenId), null);
+
+export const saveArenaPreferredWinRateToLocal = (tokenId, value) => {
+  setJsonPreference(getArenaPreferredWinRateStorageKey(tokenId), value);
 };

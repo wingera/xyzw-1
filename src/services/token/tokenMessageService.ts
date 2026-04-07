@@ -17,6 +17,10 @@ interface HandleGameMessageDeps {
     rolePayload: any,
     client: any,
   ) => void;
+  onMessageSkipped?: (
+    tokenId: string,
+    info: { message: string; cmd?: string | undefined; timestamp: number },
+  ) => void;
   attemptTokenRefresh: (tokenId: string, forceReconnect?: boolean) => Promise<boolean>;
   emitGameEvent: (cmd: string | undefined, payload: Record<string, any>) => void;
   logger: {
@@ -36,6 +40,7 @@ export const handleGameMessageById = async ({
   gameData,
   updateToken,
   syncRandomSeedFromStatistics,
+  onMessageSkipped,
   attemptTokenRefresh,
   emitGameEvent,
   logger,
@@ -43,12 +48,21 @@ export const handleGameMessageById = async ({
   try {
     if (!message) {
       logger.warn(`消息处理跳过 [${tokenId}]: 无效消息`);
+      onMessageSkipped?.(tokenId, {
+        message: "无效消息",
+        timestamp: Date.now(),
+      });
       return;
     }
 
     if (message.error) {
       const errText = String(message.error).toLowerCase();
       logger.warn(`消息处理跳过 [${tokenId}]:`, message.error);
+      onMessageSkipped?.(tokenId, {
+        message: String(message.error || ""),
+        cmd: message.cmd?.toLowerCase(),
+        timestamp: Date.now(),
+      });
 
       if (errText.includes("token") && errText.includes("expired")) {
         const connection = wsConnections.value[tokenId];

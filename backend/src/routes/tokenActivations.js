@@ -8,6 +8,12 @@ import { transaction } from "../db/client.js";
 import { activationCodeRepository } from "../repositories/activationCodeRepository.js";
 import { tokenActivationRepository } from "../repositories/tokenActivationRepository.js";
 import { userRepository } from "../repositories/userRepository.js";
+import {
+  addActivationDuration,
+  isAllowedActivationDurationMonths,
+  normalizeActivationDurationMonths,
+} from "../lib/activationCodeDuration.js";
+import { recordReferralConversionOnActivation } from "../services/referralService.js";
 
 const router = Router();
 
@@ -75,19 +81,6 @@ const activationStatusBodySchema = z.object({
   }
 });
 
-const allowedDurationMonths = new Set([1, 3, 6, 12]);
-
-const addMonths = (baseDate, months) => {
-  const safeMonths = Number(months) || 0;
-  const date = new Date(baseDate);
-  const day = date.getDate();
-  date.setMonth(date.getMonth() + safeMonths);
-  if (date.getDate() < day) {
-    date.setDate(0);
-  }
-  return date;
-};
-
 const parseFutureDateOrNull = (value, nowTs) => {
   const text = String(value || "").trim();
   if (!text) return null;
@@ -123,6 +116,9 @@ const normalizeRoleIndex = (value) => {
   const safe = Math.max(0, Math.floor(num));
   return String(safe);
 };
+
+const parseBoundSessId = (accountIdentity) =>
+  String(String(accountIdentity || "").split("|")[0] || "").trim();
 
 const buildAccountIdentity = ({ sessId, roleId, region, roleName }) =>
   `${normalizeSessId(sessId)}|${String(roleId || "").trim()}|${normalizeRegion(region)}|${normalizeRoleName(roleName)}`;
@@ -247,8 +243,8 @@ router.post(
         };
       }
 
-      const durationMonths = Math.max(1, Number(codeRow.durationMonths) || 1);
-      if (!allowedDurationMonths.has(durationMonths)) {
+      const durationMonths = normalizeActivationDurationMonths(codeRow.durationMonths);
+      if (!isAllowedActivationDurationMonths(durationMonths)) {
         return {
           status: 400,
           payload: { success: false, message: "激活码时长配置无效" },
@@ -258,7 +254,7 @@ router.post(
       const previousExpiresAt = String(binding?.expiresAt || tokenBinding?.expiresAt || "").trim();
       const activeExpiresAt = parseFutureDateOrNull(previousExpiresAt, now.getTime());
       const baseStartAt = activeExpiresAt || now;
-      const expiresAt = addMonths(baseStartAt, durationMonths).toISOString();
+      const expiresAt = addActivationDuration(baseStartAt, durationMonths).toISOString();
       const extendedFromActive = Boolean(activeExpiresAt);
       const accountSeed = String(
         tokenBinding?.accountSeed || bindingByIdentity?.accountSeed || createAccountSeed(),
@@ -267,10 +263,11 @@ router.post(
         accountIdentity,
         accountSeed,
       });
+      const tokenActivationId = binding?.id || randomId("tact");
 
       if (binding) {
         tokenActivationRepository.updateById({
-          id: binding.id,
+          id: tokenActivationId,
           tokenId,
           userId,
           roleName: normalizedRoleName,
@@ -285,7 +282,7 @@ router.post(
         });
       } else {
         tokenActivationRepository.create({
-          id: randomId("tact"),
+          id: tokenActivationId,
           tokenId,
           roleId,
           roleName: normalizedRoleName,
@@ -316,6 +313,15 @@ router.post(
         boundGameAccountId: roleCompositeLabel,
       });
 
+      recordReferralConversionOnActivation({
+        referredUserId: userId,
+        activationCodeId: codeRow.id,
+        tokenActivationId,
+        featureScope: codeRow.featureScope,
+        durationMonths,
+        grossAmountCents: codeRow.saleAmountCents,
+      });
+
       return {
         status: 200,
         payload: {
@@ -330,6 +336,7 @@ router.post(
             accountIdentity,
             roleCompositeLabel,
             gameAccountId: roleId,
+            tokenActivationId,
             boundAt: nowAt,
             expiresAt,
             previousExpiresAt: previousExpiresAt || null,
@@ -372,40 +379,33 @@ router.post(
     });
     const userId = String(req.auth?.user?.id || "").trim();
 
-    let binding = tokenId
+    const bindingByTokenId = tokenId
       ? tokenActivationRepository.findByTokenId({ tokenId })
       : null;
-    if (tokenId && !binding) {
-      return res.json({
-        success: true,
-        data: {
-          tokenId,
-          roleId,
-          roleName: normalizedRoleName,
-          region: normalizedRegion,
-          roleIndex,
-          accountIdentity,
-          sessId,
-          gameAccountId: roleId,
-          active: false,
-          bound: false,
-          expiresAt: null,
-          boundAt: null,
-        },
-      });
-    }
-    if (binding && String(binding.accountIdentity || "").trim() !== accountIdentity) {
-      return res.status(403).json({
-        success: false,
-        message: "该Token未绑定当前账号标识，请使用已绑定账号",
-      });
-    }
+    let binding = bindingByTokenId
+      && String(bindingByTokenId.accountIdentity || "").trim() === accountIdentity
+      ? bindingByTokenId
+      : null;
+
     if (!binding) {
       binding = tokenActivationRepository.findByAccountIdentity({
         accountIdentity,
       });
     }
     if (!binding) {
+      binding = tokenActivationRepository.findByRoleIdAndRegion({
+        roleId,
+        region: normalizedRegion,
+        roleIndex,
+      });
+    }
+    if (!binding) {
+      if (bindingByTokenId) {
+        return res.status(403).json({
+          success: false,
+          message: "该Token未绑定当前账号标识，请使用已绑定账号",
+        });
+      }
       return res.json({
         success: true,
         data: {
@@ -431,7 +431,11 @@ router.post(
         message: "该账号标识已绑定到其他用户",
       });
     }
-    if (tokenId && String(binding.tokenId || "").trim() && String(binding.tokenId || "").trim() !== tokenId) {
+    if (
+      tokenId
+      && bindingByTokenId
+      && String(binding.id || "").trim() !== String(bindingByTokenId.id || "").trim()
+    ) {
       return res.status(403).json({
         success: false,
         message: "该Token未绑定当前账号标识，请使用已绑定账号",
@@ -440,6 +444,7 @@ router.post(
 
     const expiresAt = String(binding.expiresAt || "");
     const active = Boolean(binding.isActive) && new Date(expiresAt).getTime() > Date.now();
+    const boundSessId = parseBoundSessId(binding.accountIdentity) || sessId;
 
     return res.json({
       success: true,
@@ -449,8 +454,8 @@ router.post(
         roleName: binding.roleName || normalizedRoleName,
         region: binding.region || normalizedRegion,
         roleIndex: String(binding.roleIndex ?? roleIndex).trim(),
-        accountIdentity: buildAccountIdentity({
-          sessId,
+        accountIdentity: String(binding.accountIdentity || "").trim() || buildAccountIdentity({
+          sessId: boundSessId,
           roleName: binding.roleName || normalizedRoleName,
           region: binding.region || normalizedRegion,
           roleId: String(binding.roleId || roleId || "").trim(),
@@ -461,7 +466,7 @@ router.post(
           roleId: String(binding.roleId || roleId || "").trim(),
           roleIndex: String(binding.roleIndex ?? roleIndex).trim(),
         }),
-        sessId,
+        sessId: boundSessId,
         gameAccountId: String(binding.roleId || roleId || "").trim(),
         active,
         bound: true,

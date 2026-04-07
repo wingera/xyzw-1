@@ -1,11 +1,21 @@
 import { gameLogger } from "@/utils/logger";
+import { touchTokenRewardSync } from "@/services/token/tokenOperationCoordination";
 import type { EVM, XyzwSession } from "./index";
 
-// 处理_ack事件，通常用于确认收到某些重要消息
-export const AckPlugin = ({
+export const ActivityPlugin = ({
   onSome,
   $emit,
 }: EVM) => {
+  onSome(["syncrewardresp"], (data: XyzwSession) => {
+    touchTokenRewardSync(data?.tokenId, "syncrewardresp", {
+      bodyKeys:
+        data?.body && typeof data.body === "object"
+          ? Object.keys(data.body).slice(0, 10)
+          : [],
+    });
+    gameLogger.verbose(`收到奖励同步事件: ${data.tokenId}`, data.body);
+  });
+
   onSome(["activity_getresp", "activity_get"], (data: XyzwSession) => {
     gameLogger.verbose(`收到活动信息事件: ${data.tokenId}`, data);
     const { body } = data;

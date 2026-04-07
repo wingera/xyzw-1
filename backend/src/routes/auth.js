@@ -16,11 +16,16 @@ import { createRateLimiter } from "../middleware/rateLimit.js";
 import { validateRequest } from "../middleware/validate.js";
 import { errorResponse } from "../lib/httpResponse.js";
 import { inviteCodeRepository } from "../repositories/inviteCodeRepository.js";
+import { referralProfileRepository } from "../repositories/referralProfileRepository.js";
 import { refreshTokenRepository } from "../repositories/refreshTokenRepository.js";
 import { userRepository } from "../repositories/userRepository.js";
 import { transaction } from "../db/client.js";
 import { env } from "../config/env.js";
 import { parseCookies } from "../lib/cookies.js";
+import {
+  clearReferralCookie,
+  readReferralCookieFromRequest,
+} from "../lib/referralCookie.js";
 import { clearCsrfCookies } from "../middleware/csrf.js";
 import { resolveCookieSecure } from "../lib/cookieSecurity.js";
 import { normalizeHttpOrigin } from "../lib/origin.js";
@@ -39,6 +44,10 @@ import {
   verifyTotpCode,
 } from "../services/mfaService.js";
 import { recordSecurityEvent } from "../services/securityEventService.js";
+import {
+  attachReferralAttributionOnRegister,
+  normalizeReferralCode,
+} from "../services/referralService.js";
 
 const router = Router();
 router.get("/temporary-invites", (_req, res) => {
@@ -102,6 +111,7 @@ const registerBodySchema = z.object({
   email: z.union([z.string().trim().email(), z.literal(""), z.null()]).optional(),
   password: z.string().min(1).max(128),
   inviteCode: z.string().trim().min(1).max(64),
+  referralCode: z.string().trim().max(32).optional().default(""),
 }).strict();
 const loginBodySchema = z.object({
   username: z.string().trim().min(1).max(128),
@@ -218,6 +228,15 @@ const refreshCookieOptions = (req, maxAgeMs) => ({
   ...(env.refreshCookieDomain ? { domain: env.refreshCookieDomain } : {}),
   maxAge: maxAgeMs,
 });
+
+const referralRegisterError = (req, res, code, message) => {
+  clearReferralCookie(req, res);
+  return res.status(400).json({
+    success: false,
+    code,
+    message,
+  });
+};
 
 const accessCookieOptions = (req, maxAgeMs) => ({
   httpOnly: true,
@@ -529,6 +548,7 @@ router.post("/register", registerLimiter, validateRequest({ body: registerBodySc
     email,
     password,
     inviteCode,
+    referralCode,
   } = req.body;
 
   const passwordCheck = await validatePasswordStrengthAsync(password, { mfaEnabled: false });
@@ -567,6 +587,55 @@ router.post("/register", registerLimiter, validateRequest({ body: registerBodySc
     return res.status(400).json({ success: false, message: "邀请码已过期" });
   }
 
+  const normalizedReferralCode = normalizeReferralCode(referralCode);
+  const referralCookieState = readReferralCookieFromRequest(req);
+  let effectiveReferralCode = "";
+  if (referralCookieState.ok) {
+    if (
+      normalizedReferralCode
+      && normalizedReferralCode !== referralCookieState.code
+    ) {
+      return referralRegisterError(
+        req,
+        res,
+        "REFERRAL_MISMATCH",
+        "推广信息不一致，请重新通过推广链接进入",
+      );
+    }
+    if (!referralProfileRepository.findByCode(referralCookieState.code)) {
+      return referralRegisterError(
+        req,
+        res,
+        "REFERRAL_INVALID",
+        "推广链接已失效，请重新通过推广链接进入",
+      );
+    }
+    effectiveReferralCode = referralCookieState.code;
+  } else if (referralCookieState.reason === "expired") {
+    return referralRegisterError(
+      req,
+      res,
+      "REFERRAL_EXPIRED",
+      "推广信息已过期，请重新通过推广链接进入",
+    );
+  } else if (referralCookieState.reason === "invalid") {
+    return referralRegisterError(
+      req,
+      res,
+      "REFERRAL_INVALID",
+      "推广信息无效，请重新通过推广链接进入",
+    );
+  } else if (env.allowLegacyReferralBodyFallback && normalizedReferralCode) {
+    if (!referralProfileRepository.findByCode(normalizedReferralCode)) {
+      return res.status(400).json({
+        success: false,
+        code: "REFERRAL_INVALID",
+        message: "推广信息无效，请重新通过推广链接进入",
+      });
+    }
+    effectiveReferralCode = normalizedReferralCode;
+  }
+
   const ts = nowIso();
   const userId = randomId("user");
   const passwordMeta = createPassword(password);
@@ -575,6 +644,7 @@ router.post("/register", registerLimiter, validateRequest({ body: registerBodySc
   const trialExpiresAt = isTemporaryInvite
     ? new Date(Date.now() + TEMP_ACCOUNT_DAYS * 24 * 60 * 60 * 1000).toISOString()
     : null;
+  let referralAttribution = null;
 
   transaction(() => {
     userRepository.create({
@@ -597,7 +667,21 @@ router.post("/register", registerLimiter, validateRequest({ body: registerBodySc
       usedBy: userId,
       usedAt: ts,
     });
+
+    if (effectiveReferralCode) {
+      referralAttribution = attachReferralAttributionOnRegister({
+        referralCode: effectiveReferralCode,
+        referredUserId: userId,
+        inviteCodeId: invite.id,
+        inviteCodeMask: invite.codeMask || invite.code || null,
+        registeredAt: ts,
+        registerIp: req.ip || null,
+        registerUserAgent: req.headers["user-agent"] || null,
+      });
+    }
   });
+
+  clearReferralCookie(req, res);
 
   return res.json({
     success: true,
@@ -605,6 +689,7 @@ router.post("/register", registerLimiter, validateRequest({ body: registerBodySc
     data: {
       isTemporaryInvite,
       trialExpiresAt,
+      referralAttributed: Boolean(referralAttribution?.id),
     },
   });
 });
@@ -1318,6 +1403,7 @@ router.get("/csrf", (req, res) => {
     data: {
       headerName: env.csrfHeaderName,
       token: req.csrfToken || null,
+      hasRefreshTokenCookie: Boolean(readRefreshTokenFromRequest(req)),
     },
   });
 });

@@ -1,6 +1,7 @@
 import { query, run } from "../db/client.js";
 import { env } from "../config/env.js";
 import { codeSuffix, hmacHex, maskedCode } from "../lib/crypto.js";
+import { normalizeActivationDurationMonths } from "../lib/activationCodeDuration.js";
 import { normalizeAccessScope } from "../constants/accessScope.js";
 
 const redactStoredCode = (id) => `activation-redacted:${String(id || "").trim()}`;
@@ -15,7 +16,9 @@ const normalizeActivationCode = (row) => {
     codeMask: String(row.codeMask || row.code || "").trim(),
     codeSuffix: String(row.codeSuffix || "").trim(),
     featureScope: normalizeAccessScope(row.featureScope),
-    durationMonths: Math.max(1, Number(row.durationMonths) || 1),
+    durationMonths: normalizeActivationDurationMonths(row.durationMonths),
+    saleAmountCents: Math.max(0, Number(row.saleAmountCents) || 0),
+    saleCurrency: String(row.saleCurrency || "CNY").trim() || "CNY",
     isActive: Number(row.isActive) === 1,
     isDeleted: Number(row.isDeleted) === 1,
   };
@@ -38,6 +41,8 @@ export const activationCodeRepository = {
          created_by as createdBy,
          feature_scope as featureScope,
          duration_months as durationMonths,
+         sale_amount_cents as saleAmountCents,
+         sale_currency as saleCurrency,
          used_by as usedBy,
          used_at as usedAt,
          bound_token_id as boundTokenId,
@@ -60,6 +65,9 @@ export const activationCodeRepository = {
          code_mask as codeMask,
          code_suffix as codeSuffix,
          feature_scope as featureScope,
+         duration_months as durationMonths,
+         sale_amount_cents as saleAmountCents,
+         sale_currency as saleCurrency,
          used_at as usedAt,
          is_deleted as isDeleted,
          is_active as isActive
@@ -76,15 +84,17 @@ export const activationCodeRepository = {
     createdBy,
     featureScope = "full",
     durationMonths,
+    saleAmountCents = 0,
+    saleCurrency = "CNY",
     createdAt,
   }) {
     run(
       `INSERT INTO activation_codes (
-         id, code, code_hmac, code_suffix, code_mask, created_by, feature_scope, duration_months,
+         id, code, code_hmac, code_suffix, code_mask, created_by, feature_scope, duration_months, sale_amount_cents, sale_currency,
          used_by, used_at, bound_token_id, bound_game_account_id,
          is_active, created_at
        ) VALUES (
-         $id, $storedCode, $codeHmac, $codeSuffix, $codeMask, $createdBy, $featureScope, $durationMonths,
+         $id, $storedCode, $codeHmac, $codeSuffix, $codeMask, $createdBy, $featureScope, $durationMonths, $saleAmountCents, $saleCurrency,
          NULL, NULL, NULL, NULL,
          1, $createdAt
        )`,
@@ -96,7 +106,9 @@ export const activationCodeRepository = {
         $codeMask: activationCodeMask(code),
         $createdBy: String(createdBy || "").trim(),
         $featureScope: normalizeAccessScope(featureScope),
-        $durationMonths: Math.max(1, Math.min(24, Number(durationMonths) || 1)),
+        $durationMonths: normalizeActivationDurationMonths(durationMonths),
+        $saleAmountCents: Math.max(0, Number(saleAmountCents) || 0),
+        $saleCurrency: String(saleCurrency || "CNY").trim() || "CNY",
         $createdAt: String(createdAt || "").trim(),
       },
     );
@@ -145,6 +157,8 @@ export const activationCodeRepository = {
          ac.created_at as createdAt,
          ac.feature_scope as featureScope,
          ac.duration_months as durationMonths,
+         ac.sale_amount_cents as saleAmountCents,
+         ac.sale_currency as saleCurrency,
          ac.is_active as isActive,
          ac.is_deleted as isDeleted,
          ac.used_at as usedAt,
@@ -174,11 +188,8 @@ export const activationCodeRepository = {
   resetBindingById(id) {
     const result = run(
       `UPDATE activation_codes
-       SET used_by = NULL,
-           used_at = NULL,
-           bound_token_id = NULL,
-           bound_game_account_id = NULL,
-           is_active = CASE WHEN is_deleted = 0 THEN 1 ELSE 0 END
+       SET bound_token_id = NULL,
+           bound_game_account_id = NULL
        WHERE id = $id`,
       { $id: String(id || "").trim() },
     );
@@ -188,12 +199,10 @@ export const activationCodeRepository = {
   resetAllConsumedBindings() {
     const result = run(
       `UPDATE activation_codes
-       SET used_by = NULL,
-           used_at = NULL,
-           bound_token_id = NULL,
-           bound_game_account_id = NULL,
-           is_active = CASE WHEN is_deleted = 0 THEN 1 ELSE 0 END
-       WHERE used_at IS NOT NULL`,
+       SET bound_token_id = NULL,
+           bound_game_account_id = NULL
+       WHERE bound_token_id IS NOT NULL
+          OR bound_game_account_id IS NOT NULL`,
     );
     return Number(result?.changes || 0);
   },

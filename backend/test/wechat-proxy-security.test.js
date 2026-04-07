@@ -109,6 +109,103 @@ test("POST /wechat-proxy/hortor-login rejects requests without allowed Origin/Re
   assert.equal(upstreamCalls, 0);
 });
 
+test("POST /wechat-proxy/hortor-login forwards header deviceUniqueId to upstream", async (t) => {
+  await initDatabase();
+  run(`DELETE FROM security_rate_limits WHERE scope_key LIKE 'wechat_proxy_%'`);
+
+  let upstreamUrl = "";
+  let upstreamMethod = "";
+  let upstreamBody = "";
+  const originalFetch = global.fetch;
+  global.fetch = async (url, options = {}) => {
+    upstreamUrl = String(url);
+    upstreamMethod = String(options.method || "");
+    upstreamBody = String(options.body || "");
+    return new Response('{"meta":{"errCode":0},"data":{"combUser":{"id":"u1"}}}', {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+      },
+    });
+  };
+  t.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  const server = await createServer();
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    run(`DELETE FROM security_rate_limits WHERE scope_key LIKE 'wechat_proxy_%'`);
+  });
+
+  const response = await requestLocal({
+    url:
+      `${makeBaseUrl(server)}/api/v1/wechat-proxy/hortor-login` +
+      "?gameId=xyzwapp" +
+      "&timestamp=1700000000000&version=android-4.2.1-cn-release" +
+      "&cryptVersion=1.1.0&gameTp=app&system=android" +
+      "&packageName=com.hortorgames.xyzw",
+    method: "POST",
+    headers: {
+      origin: env.corsOrigins[0],
+      referer: `${env.corsOrigins[0]}/login`,
+      "content-type": "text/plain; charset=utf-8",
+      "x-xyzw-device-unique-id": "DID-test_123",
+    },
+    body: "encoded-payload",
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(upstreamMethod, "POST");
+  assert.equal(upstreamBody, "encoded-payload");
+
+  const target = new URL(upstreamUrl);
+  assert.equal(
+    target.toString().includes("deviceUniqueId=DID-test_123"),
+    true,
+  );
+  assert.equal(target.searchParams.get("deviceUniqueId"), "DID-test_123");
+  assert.equal(target.searchParams.get("gameId"), "xyzwapp");
+  assert.equal(target.searchParams.get("packageName"), "com.hortorgames.xyzw");
+});
+
+test("POST /wechat-proxy/hortor-login rejects query deviceUniqueId before upstream", async (t) => {
+  await initDatabase();
+  run(`DELETE FROM security_rate_limits WHERE scope_key LIKE 'wechat_proxy_%'`);
+
+  let upstreamCalls = 0;
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    upstreamCalls += 1;
+    return new Response("ok", { status: 200 });
+  };
+  t.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  const server = await createServer();
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    run(`DELETE FROM security_rate_limits WHERE scope_key LIKE 'wechat_proxy_%'`);
+  });
+
+  const response = await requestLocal({
+    url: `${makeBaseUrl(server)}/api/v1/wechat-proxy/hortor-login?gameId=xyzwapp&deviceUniqueId=abc`,
+    method: "POST",
+    headers: {
+      origin: env.corsOrigins[0],
+      referer: `${env.corsOrigins[0]}/login`,
+      "content-type": "text/plain; charset=utf-8",
+      "x-xyzw-device-unique-id": "DID-test_123",
+    },
+    body: "payload",
+  });
+
+  assert.equal(response.status, 400);
+  assert.equal(upstreamCalls, 0);
+  assert.equal(response.body.includes("deviceUniqueId"), true);
+});
+
 test("POST /wechat-proxy/hortor-login can enforce guest-only mode", async (t) => {
   await initDatabase();
   run(`DELETE FROM security_rate_limits WHERE scope_key LIKE 'wechat_proxy_%'`);
@@ -152,6 +249,75 @@ test("POST /wechat-proxy/hortor-login can enforce guest-only mode", async (t) =>
   });
 
   assert.equal(response.status, 403);
+});
+
+test("POST /wechat-proxy/qrstatus forwards body uuid to upstream", async (t) => {
+  await initDatabase();
+  run(`DELETE FROM security_rate_limits WHERE scope_key LIKE 'wechat_proxy_%'`);
+
+  let upstreamUrl = "";
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    upstreamUrl = String(url);
+    return new Response("ok", { status: 200 });
+  };
+  t.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  const server = await createServer();
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    run(`DELETE FROM security_rate_limits WHERE scope_key LIKE 'wechat_proxy_%'`);
+  });
+
+  const response = await requestLocal({
+    url: `${makeBaseUrl(server)}/api/v1/wechat-proxy/qrstatus`,
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ uuid: "wx_uuid_123" }),
+  });
+
+  assert.equal(response.status, 200);
+  const target = new URL(upstreamUrl);
+  assert.equal(target.searchParams.get("uuid"), "wx_uuid_123");
+  assert.equal(target.searchParams.get("f"), "url");
+  assert.equal(Boolean(target.searchParams.get("_")), true);
+});
+
+test("POST /wechat-proxy/qrstatus rejects query uuid before upstream", async (t) => {
+  await initDatabase();
+  run(`DELETE FROM security_rate_limits WHERE scope_key LIKE 'wechat_proxy_%'`);
+
+  let upstreamCalls = 0;
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    upstreamCalls += 1;
+    return new Response("ok", { status: 200 });
+  };
+  t.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  const server = await createServer();
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    run(`DELETE FROM security_rate_limits WHERE scope_key LIKE 'wechat_proxy_%'`);
+  });
+
+  const response = await requestLocal({
+    url: `${makeBaseUrl(server)}/api/v1/wechat-proxy/qrstatus?uuid=wx_uuid_123`,
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ uuid: "wx_uuid_123" }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.equal(upstreamCalls, 0);
 });
 
 test("GET /wechat-proxy/qrconnect is rate limited", async (t) => {
