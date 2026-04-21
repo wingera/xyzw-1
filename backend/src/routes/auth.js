@@ -91,11 +91,12 @@ import {
   verifyMfaCredentials,
 } from "../modules/auth/mfaChallenge.js";
 import {
-  createMfaLoginChallenge,
+  applyMfaResetByLink,
+  issueLoginMfaChallenge,
   issueMfaResetLinkToken,
   MFA_RESET_LINK_TTL_SECONDS,
-  parseMfaResetLinkToken,
   resolveMfaLoginChallenge,
+  resolveMfaResetLinkRequest,
   verifyMfaLoginCredentials,
 } from "../modules/auth/mfaService.js";
 import {
@@ -544,7 +545,7 @@ router.post("/login", loginLimiter, validateRequest({ body: loginBodySchema }), 
   }
 
   if (user.mfaEnabled) {
-    const mfaChallengeToken = createMfaLoginChallenge({
+    const mfaChallengeToken = issueLoginMfaChallenge({
       user,
       rememberMe,
       loginMethod: "password+mfa",
@@ -826,7 +827,7 @@ router.get("/wechat/callback", async (req, res) => {
     }
 
     if (user.mfaEnabled) {
-      const mfaChallengeToken = createMfaLoginChallenge({
+      const mfaChallengeToken = issueLoginMfaChallenge({
         user,
         rememberMe: Boolean(flow.rememberMe),
         loginMethod: "wechat+mfa",
@@ -1263,58 +1264,27 @@ router.post(
   "/mfa/reset-by-link",
   validateRequest({ body: mfaResetLinkBodySchema }),
   (req, res) => {
-    let payload;
-    try {
-      payload = parseMfaResetLinkToken(String(req.body?.token || "").trim());
-    } catch {
-      return res.status(401).json({
+    const resetRequest = resolveMfaResetLinkRequest({
+      token: req.body?.token,
+      isLocalRequest: isLocalMfaResetRequest(req),
+    });
+    if (!resetRequest.ok) {
+      return res.status(resetRequest.status).json({
         success: false,
-        message: "重置链接无效或已过期",
+        message: resetRequest.message,
       });
     }
 
-    const user = userRepository.findById(String(payload?.sub || ""));
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "账号不存在",
-      });
-    }
+    const { user, payload } = resetRequest;
+    const resetResult = applyMfaResetByLink({ user });
 
-    if (user.isAdmin && !isLocalMfaResetRequest(req)) {
-      return res.status(403).json({
-        success: false,
-        message: "管理员账号的二次验证重置仅允许在本地 127.0.0.1 环境执行",
-      });
-    }
-
-    if (Number(user.tokenVersion ?? 0) !== Number(payload?.ver ?? -1)) {
-      return res.status(401).json({
-        success: false,
-        message: "重置链接无效或已失效",
-      });
-    }
-
-    if (!user.mfaEnabled) {
+    if (resetResult.alreadyDisabled) {
       return res.json({
         success: true,
         message: "当前账号的二次验证已处于未启用状态",
       });
     }
 
-    const ts = nowIso();
-    userRepository.disableMfa({
-      id: user.id,
-      updatedAt: ts,
-    });
-    userRepository.bumpTokenVersion({
-      id: user.id,
-      updatedAt: ts,
-    });
-    refreshTokenRepository.revokeAllByUserId({
-      userId: user.id,
-      revokedAt: ts,
-    });
     recordSecurityEvent({
       userId: user.id,
       eventType: "mfa_reset_by_link",
@@ -1323,7 +1293,7 @@ router.post(
       },
       ip: req.ip || null,
       userAgent: req.headers["user-agent"] || null,
-      createdAt: ts,
+      createdAt: resetResult.updatedAt,
     });
 
     return res.json({

@@ -6,12 +6,13 @@ import { env } from "../src/config/env.js";
 import { initDatabase } from "../src/db/database.js";
 import { query, run } from "../src/db/client.js";
 import { nowIso } from "../src/db/sql.js";
-import { createPassword, verifyPassword } from "../src/lib/crypto.js";
+import { createPassword, signJwt, verifyPassword } from "../src/lib/crypto.js";
 import { issueMfaResetLinkToken, MFA_RESET_LINK_TTL_SECONDS } from "../src/routes/auth.js";
 import authRoutes from "../src/routes/auth.js";
 import { userRepository } from "../src/repositories/userRepository.js";
 import { encryptMfaSecret, generateTotpCode } from "../src/services/mfaService.js";
 import { PASSWORD_RESET_GENERIC_MESSAGE } from "../src/modules/auth/passwordReset.js";
+import { MFA_RESET_LINK_PURPOSE } from "../src/modules/auth/mfaChallenge.js";
 
 const makeBaseUrl = (server) => {
   const address = server.address();
@@ -241,6 +242,21 @@ const callPasswordReset = async ({
     response,
     payload: await response.json(),
     cookies: response.headers.getSetCookie(),
+  };
+};
+
+const callMfaResetByLink = async ({ baseUrl, token }) => {
+  const response = await fetch(`${baseUrl}/api/v1/auth/mfa/reset-by-link`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "user-agent": "auth-route-characterization",
+    },
+    body: JSON.stringify({ token }),
+  });
+  return {
+    response,
+    payload: await response.json(),
   };
 };
 
@@ -993,4 +1009,126 @@ test("MFA reset link compatibility export preserves reset-by-link behavior", asy
   )[0];
   assert.equal(Number(row.mfaEnabled), 0);
   assert.equal(Number(row.tokenVersion), 1);
+});
+
+test("POST /auth/mfa/reset-by-link preserves invalid, expired, stale, and already-disabled responses", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const activeUser = {
+    id: `route_mfa_reset_active_${suffix}`,
+    username: `route_mfa_reset_active_${suffix}`,
+    password: "RouteMfaResetActive123!Aa",
+    secret: "JBSWY3DPEHPK3PXP",
+  };
+  const disabledUser = {
+    id: `route_mfa_reset_disabled_${suffix}`,
+    username: `route_mfa_reset_disabled_${suffix}`,
+    password: "RouteMfaResetDisabled123!Aa",
+  };
+  seedUser({
+    userId: activeUser.id,
+    username: activeUser.username,
+    password: activeUser.password,
+    mfaEnabled: true,
+    mfaSecret: activeUser.secret,
+  });
+  seedUser({
+    userId: disabledUser.id,
+    username: disabledUser.username,
+    password: disabledUser.password,
+    mfaEnabled: false,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(activeUser.id);
+    cleanupUser(disabledUser.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+
+  const invalidResult = await callMfaResetByLink({
+    baseUrl,
+    token: "not-a-valid-token",
+  });
+  assert.equal(invalidResult.response.status, 401);
+  assert.deepEqual(invalidResult.payload, {
+    success: false,
+    message: "重置链接无效或已过期",
+  });
+
+  const expiredToken = signJwt(
+    {
+      sub: activeUser.id,
+      username: activeUser.username,
+      ver: 0,
+      purpose: MFA_RESET_LINK_PURPOSE,
+      requestedBy: "admin_user",
+      mfaEnabled: true,
+    },
+    -60,
+  );
+  const expiredResult = await callMfaResetByLink({
+    baseUrl,
+    token: expiredToken,
+  });
+  assert.equal(expiredResult.response.status, 401);
+  assert.deepEqual(expiredResult.payload, {
+    success: false,
+    message: "重置链接无效或已过期",
+  });
+
+  const staleToken = issueMfaResetLinkToken(
+    {
+      id: activeUser.id,
+      username: activeUser.username,
+      tokenVersion: 0,
+      mfaEnabled: true,
+    },
+    { requestedBy: "admin_user" },
+  );
+  userRepository.bumpTokenVersion({
+    id: activeUser.id,
+    updatedAt: nowIso(),
+  });
+  const staleResult = await callMfaResetByLink({
+    baseUrl,
+    token: staleToken,
+  });
+  assert.equal(staleResult.response.status, 401);
+  assert.deepEqual(staleResult.payload, {
+    success: false,
+    message: "重置链接无效或已失效",
+  });
+  const activeAfterStale = query(
+    `SELECT mfa_enabled as mfaEnabled, token_version as tokenVersion FROM users WHERE id = $id`,
+    { $id: activeUser.id },
+  )[0];
+  assert.equal(Number(activeAfterStale.mfaEnabled), 1);
+  assert.equal(Number(activeAfterStale.tokenVersion), 1);
+
+  const alreadyDisabledToken = issueMfaResetLinkToken(
+    {
+      id: disabledUser.id,
+      username: disabledUser.username,
+      tokenVersion: 0,
+      mfaEnabled: false,
+    },
+    { requestedBy: "admin_user" },
+  );
+  const alreadyDisabledResult = await callMfaResetByLink({
+    baseUrl,
+    token: alreadyDisabledToken,
+  });
+  assert.equal(alreadyDisabledResult.response.status, 200);
+  assert.deepEqual(alreadyDisabledResult.payload, {
+    success: true,
+    message: "当前账号的二次验证已处于未启用状态",
+  });
+  const disabledAfter = query(
+    `SELECT mfa_enabled as mfaEnabled, token_version as tokenVersion FROM users WHERE id = $id`,
+    { $id: disabledUser.id },
+  )[0];
+  assert.equal(Number(disabledAfter.mfaEnabled), 0);
+  assert.equal(Number(disabledAfter.tokenVersion), 0);
 });
