@@ -13,6 +13,8 @@ export const MFA_RESET_LINK_TTL_SECONDS = 60 * 60;
 export const MFA_RESET_LINK_PURPOSE = "auth-mfa-reset-link";
 export const MFA_QR_SESSION_TTL_MS = MFA_CHALLENGE_TTL_SECONDS * 1000;
 export const MAX_MFA_QR_SESSION_COUNT = 500;
+const MISSING_TOTP_CODE = "__missing_mfa_totp_code__";
+const MISSING_RECOVERY_CODE = "__missing_mfa_recovery_code__";
 
 export const mfaQrSessionStore = new Map();
 
@@ -32,7 +34,7 @@ export const issueMfaChallengeToken = (
       rememberMe: Boolean(rememberMe),
       loginMethod: String(loginMethod || "password+mfa").trim() || "password+mfa",
     },
-    MFA_CHALLENGE_TTL_SECONDS,
+    5 * 60,
   );
 
 export const issueMfaResetLinkToken = (user, { requestedBy = "" } = {}) =>
@@ -45,7 +47,7 @@ export const issueMfaResetLinkToken = (user, { requestedBy = "" } = {}) =>
       requestedBy: String(requestedBy || "").trim() || null,
       mfaEnabled: Boolean(user.mfaEnabled),
     },
-    MFA_RESET_LINK_TTL_SECONDS,
+    60 * 60,
   );
 
 export const parseMfaChallengeToken = (challengeToken) => {
@@ -129,17 +131,23 @@ export const getMfaChallengeUser = (challengeToken) => {
   };
 };
 
-export const verifyMfaCredentials = ({ user, secret, totpCode, recoveryCode }) => {
-  if (totpCode) {
-    return { ok: verifyTotpCode({ secret, code: totpCode }) };
-  }
-
-  if (!recoveryCode) {
-    return { ok: false };
+export const verifyMfaCredentials = ({
+  user,
+  secret,
+  totpCode,
+  recoveryCode,
+  updateMfaRecoveryCodesHash = userRepository.updateMfaRecoveryCodesHash,
+}) => {
+  const totpPassed = verifyTotpCode({
+    secret,
+    code: String(totpCode || MISSING_TOTP_CODE),
+  });
+  if (totpPassed) {
+    return { ok: true };
   }
 
   const recoveryResult = verifyAndConsumeRecoveryCode({
-    inputCode: recoveryCode,
+    inputCode: String(recoveryCode || MISSING_RECOVERY_CODE),
     recoveryCodeHashesJson: user.mfaRecoveryCodesHash || "[]",
   });
 
@@ -147,7 +155,7 @@ export const verifyMfaCredentials = ({ user, secret, totpCode, recoveryCode }) =
     return { ok: false };
   }
 
-  userRepository.updateMfaRecoveryCodesHash({
+  updateMfaRecoveryCodesHash({
     id: user.id,
     mfaRecoveryCodesHash: recoveryResult.nextRecoveryCodeHashesJson,
     updatedAt: nowIso(),

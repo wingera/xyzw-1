@@ -1,6 +1,7 @@
 export const parseCookies = (rawCookieHeader) => {
   const pairs = String(rawCookieHeader || "").split(";");
-  const result = {};
+  const result = Object.create(null);
+  const blockedCookieNames = new Set(["__proto__", "constructor", "prototype"]);
   pairs.forEach((segment) => {
     const part = String(segment || "").trim();
     if (!part) return;
@@ -13,6 +14,9 @@ export const parseCookies = (rawCookieHeader) => {
       value = decodeURIComponent(value);
     } catch {
       // ignore malformed cookie encoding
+    }
+    if (blockedCookieNames.has(key)) {
+      return;
     }
     if (result[key] === undefined) {
       result[key] = value;

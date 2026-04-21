@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { env } from "../src/config/env.js";
+import { parseCookies } from "../src/lib/cookies.js";
 import { verifyJwt } from "../src/lib/crypto.js";
+import { createMfaSetupPayload } from "../src/services/mfaService.js";
 import {
   ACCESS_TOKEN_TTL_SECONDS,
   buildAccessToken,
@@ -13,6 +15,7 @@ import {
 } from "../src/modules/auth/tokens.js";
 import {
   accessCookieOptions,
+  parseRefreshTokenCredential,
   readRefreshTokenFromRequest,
   refreshCookieOptions,
 } from "../src/modules/auth/cookies.js";
@@ -27,9 +30,11 @@ import {
   MFA_RESET_LINK_PURPOSE,
   parseMfaChallengeToken,
   parseMfaResetLinkToken,
+  verifyMfaCredentials,
 } from "../src/modules/auth/mfaChallenge.js";
 import {
   isLocalMfaResetRequest,
+  logPasswordResetMaskedReason,
   maskIdentity,
   PASSWORD_RESET_GENERIC_MESSAGE,
 } from "../src/modules/auth/passwordReset.js";
@@ -125,6 +130,46 @@ test("auth cookie helpers preserve refresh/access cookie options", () => {
   assert.equal(accessCookieOptions(httpsReq, 1).secure, true);
 });
 
+test("auth cookie helpers classify refresh token credentials without trusting raw cookie shape", () => {
+  assert.deepEqual(parseRefreshTokenCredential(""), {
+    ok: false,
+    raw: "",
+    tokenId: "",
+    reason: "missing",
+  });
+  assert.deepEqual(parseRefreshTokenCredential(".secret"), {
+    ok: false,
+    raw: ".secret",
+    tokenId: "",
+    reason: "invalid",
+  });
+  assert.deepEqual(parseRefreshTokenCredential("rft_bad.traversal/secret"), {
+    ok: false,
+    raw: "rft_bad.traversal/secret",
+    tokenId: "",
+    reason: "invalid",
+  });
+  assert.deepEqual(parseRefreshTokenCredential("rft_valid.ABCDEFGHIJKLMNOP"), {
+    ok: true,
+    raw: "rft_valid.ABCDEFGHIJKLMNOP",
+    tokenId: "rft_valid",
+    reason: "",
+  });
+});
+
+test("auth cookie parser rejects prototype-polluting cookie names", () => {
+  const cookies = parseCookies(
+    `${env.refreshCookieName}=rft_1.value; __proto__=polluted; constructor=bad; prototype=bad`,
+  );
+
+  assert.equal(cookies[env.refreshCookieName], "rft_1.value");
+  assert.equal(Object.getPrototypeOf(cookies), null);
+  assert.equal(Object.hasOwn(cookies, "__proto__"), false);
+  assert.equal(Object.hasOwn(cookies, "constructor"), false);
+  assert.equal(Object.hasOwn(cookies, "prototype"), false);
+  assert.equal({}.polluted, undefined);
+});
+
 test("auth session payload helper preserves frontend-visible user shape", () => {
   const user = {
     id: "user_payload",
@@ -191,6 +236,28 @@ test("mfa challenge helpers preserve token purpose, version, and username checks
   assert.equal(resetPayload.mfaEnabled, true);
 });
 
+test("mfa credential helper does not let blank totp shadow recovery codes", () => {
+  const setup = createMfaSetupPayload({ username: "mfa-helper" });
+  const user = {
+    id: "user_mfa_recovery",
+    mfaRecoveryCodesHash: JSON.stringify(setup.recoveryCodeHashes),
+  };
+  let consumedRecoveryCodes = "";
+
+  const result = verifyMfaCredentials({
+    user,
+    secret: setup.secret,
+    totpCode: "   ",
+    recoveryCode: setup.recoveryCodes[0],
+    updateMfaRecoveryCodesHash({ mfaRecoveryCodesHash }) {
+      consumedRecoveryCodes = mfaRecoveryCodesHash;
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(JSON.parse(consumedRecoveryCodes).length, setup.recoveryCodeHashes.length - 1);
+});
+
 test("password reset helpers preserve generic messaging and local reset detection", () => {
   assert.equal(PASSWORD_RESET_GENERIC_MESSAGE, "如果信息正确，密码已重置，请使用新密码登录");
   assert.equal(maskIdentity(""), "");
@@ -202,6 +269,24 @@ test("password reset helpers preserve generic messaging and local reset detectio
   assert.equal(isLocalMfaResetRequest(makeReq({ origin: "http://127.0.0.1:3000" })), true);
   assert.equal(isLocalMfaResetRequest(makeReq({ referer: "http://127.0.0.1:3000/admin" })), true);
   assert.equal(isLocalMfaResetRequest(makeReq({ hostname: "example.com" })), false);
+});
+
+test("password reset masked reason logging is safe for plain-text logs", () => {
+  const originalWarn = console.warn;
+  const calls = [];
+  console.warn = (...args) => {
+    calls.push(args.join(" "));
+  };
+  try {
+    logPasswordResetMaskedReason("ab\r\n[INFO] forged\u0000entry", "expired_code");
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(calls[0], /[\r\n\u0000]/);
+  assert.match(calls[0], /identity=ab/);
+  assert.doesNotMatch(calls[0], /forged/);
 });
 
 test("csrf helper reports header name, token, and refresh cookie presence", () => {

@@ -66,6 +66,7 @@ import {
 import {
   clearAccessCookie,
   clearRefreshCookie,
+  parseRefreshTokenCredential,
   readRefreshTokenFromRequest,
   refreshCookieOptions,
   setAccessCookie,
@@ -1448,25 +1449,19 @@ router.post("/password-reset", resetPasswordLimiter, validateRequest({ body: pas
 
 router.post("/refresh", refreshLimiter, (req, res) => {
   try {
-    const refreshTokenRaw = readRefreshTokenFromRequest(req);
-    if (!refreshTokenRaw) {
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_REFRESH_MISSING", "缺少刷新令牌，请重新登录");
-    }
-
-    const [tokenId] = refreshTokenRaw.split(".");
-    if (!tokenId) {
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_REFRESH_INVALID", "刷新令牌无效，请重新登录");
-    }
-
-    const record = refreshTokenRepository.findById(tokenId);
-    const tokenHash = sha256Hex(refreshTokenRaw);
+    const refreshCredential = parseRefreshTokenCredential(readRefreshTokenFromRequest(req));
+    const record = refreshTokenRepository.findById(
+      refreshCredential.tokenId || "rft_invalid_refresh_token",
+    );
+    const tokenHash = refreshCredential.ok
+      ? sha256Hex(refreshCredential.raw)
+      : "";
     if (!record || record.tokenHash !== tokenHash) {
       clearRefreshCookie(req, res);
       clearAccessCookie(req, res);
+      if (refreshCredential.reason === "missing") {
+        return errorResponse(res, 401, "AUTH_REFRESH_MISSING", "缺少刷新令牌，请重新登录");
+      }
       return errorResponse(res, 401, "AUTH_REFRESH_INVALID", "刷新令牌无效，请重新登录");
     }
 

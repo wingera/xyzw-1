@@ -1,6 +1,7 @@
 import { normalizeHttpOrigin } from "../../lib/origin.js";
 
 export const PASSWORD_RESET_GENERIC_MESSAGE = "如果信息正确，密码已重置，请使用新密码登录";
+const LOG_CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/g;
 
 export const isLocalMfaResetRequest = (req) => {
   const origin = normalizeHttpOrigin(String(req.get("origin") || "").trim());
@@ -19,9 +20,12 @@ export const isLocalMfaResetRequest = (req) => {
   );
 };
 
-export const logPasswordResetMaskedReason = (identity, reason) => {
-  // eslint-disable-next-line no-console
-  console.warn(`[auth] password reset masked reason: ${reason} (identity=${identity || "unknown"})`);
+export const toLogSafeText = (value, fallback = "unknown") => {
+  const text = String(value || "")
+    .replace(LOG_CONTROL_CHARS_RE, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text || fallback;
 };
 
 export const maskIdentity = (identity) => {
@@ -33,4 +37,11 @@ export const maskIdentity = (identity) => {
     return "*".repeat(text.length);
   }
   return `${text.slice(0, 2)}***`;
+};
+
+export const logPasswordResetMaskedReason = (identity, reason) => {
+  const safeReason = toLogSafeText(reason, "unknown");
+  const safeIdentity = toLogSafeText(maskIdentity(identity), "unknown");
+  // eslint-disable-next-line no-console
+  console.warn(`[auth] password reset masked reason: ${safeReason} (identity=${safeIdentity})`);
 };
