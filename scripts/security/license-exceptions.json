@@ -1,0 +1,80 @@
+[
+  {
+    "dependency": "@resvg/resvg-js",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Backend SVG-to-PNG export rendering for battle report and club member image exports; package-level exception only, do not allow MPL-2.0 globally."
+  },
+  {
+    "dependency": "@resvg/resvg-js-android-arm-eabi",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-android-arm64",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-darwin-arm64",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-darwin-x64",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-linux-arm-gnueabihf",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-linux-arm64-gnu",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-linux-arm64-musl",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-linux-x64-gnu",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-linux-x64-musl",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-win32-arm64-msvc",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-win32-ia32-msvc",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  },
+  {
+    "dependency": "@resvg/resvg-js-win32-x64-msvc",
+    "version": "2.6.2",
+    "license": "MPL-2.0",
+    "reason": "Optional native platform package for @resvg/resvg-js 2.6.2; package-level exception only."
+  }
+]

@@ -8,7 +8,7 @@
 
     <main class="android-app-page__main">
       <section class="android-app-page__hero public-brand-glass-card">
-        <div class="android-app-page__hero-glow" aria-hidden="true"></div>
+        <div aria-hidden="true" class="android-app-page__hero-glow"></div>
         <div class="container android-app-page__hero-inner">
           <div class="android-app-page__copy">
             <span class="android-app-page__eyebrow">
@@ -59,8 +59,8 @@
                 {{ t("androidAppPage.actions.download") }}
               </n-button>
               <n-button
-                class="android-app-page__secondary-button"
                 ghost
+                class="android-app-page__secondary-button"
                 size="large"
                 type="primary"
                 @click="router.push('/')"
@@ -77,7 +77,7 @@
               }}
             </p>
 
-            <div class="android-app-page__highlight-grid" aria-label="Android App highlights">
+            <div aria-label="Android App highlights" class="android-app-page__highlight-grid">
               <article
                 v-for="item in highlightCards"
                 :key="item.id"
@@ -89,7 +89,7 @@
             </div>
           </div>
 
-          <div class="android-app-page__visual" aria-label="Android App preview">
+          <div aria-label="Android App preview" class="android-app-page__visual">
             <div class="android-app-page__floating-card android-app-page__floating-card--download">
               <n-icon>
                 <DownloadOutline></DownloadOutline>
