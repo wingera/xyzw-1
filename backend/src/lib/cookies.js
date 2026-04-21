@@ -1,6 +1,6 @@
 export const parseCookies = (rawCookieHeader) => {
   const pairs = String(rawCookieHeader || "").split(";");
-  const result = Object.create(null);
+  const result = new Map();
   const blockedCookieNames = new Set(["__proto__", "constructor", "prototype"]);
   pairs.forEach((segment) => {
     const part = String(segment || "").trim();
@@ -18,9 +18,11 @@ export const parseCookies = (rawCookieHeader) => {
     if (blockedCookieNames.has(key)) {
       return;
     }
-    if (result[key] === undefined) {
-      result[key] = value;
+    if (!result.has(key)) {
+      result.set(key, value);
     }
   });
-  return result;
+  const cookies = Object.fromEntries(result);
+  Object.setPrototypeOf(cookies, null);
+  return cookies;
 };

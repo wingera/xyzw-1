@@ -285,7 +285,7 @@ test("password reset masked reason logging is safe for plain-text logs", () => {
 
   assert.equal(calls.length, 1);
   assert.doesNotMatch(calls[0], /[\r\n\u0000]/);
-  assert.match(calls[0], /identity=ab/);
+  assert.match(calls[0], /identity=masked/);
   assert.doesNotMatch(calls[0], /forged/);
 });
 
