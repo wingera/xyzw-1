@@ -107,7 +107,8 @@ import {
   PASSWORD_RESET_GENERIC_MESSAGE,
 } from "../modules/auth/passwordReset.js";
 import {
-  deactivatePasswordResetCode,
+  applyPasswordReset,
+  assertPasswordResetCodeUsable,
   findPasswordResetCode,
   findPasswordResetUser,
 } from "../modules/auth/passwordResetService.js";
@@ -1475,40 +1476,16 @@ router.post("/password-reset", resetPasswordLimiter, validateRequest({ body: pas
     shortCode,
   });
 
-  if (!codeRow || Number(codeRow.isActive) !== 1 || codeRow.usedAt) {
-    logPasswordResetMaskedReason(identity, "invalid_or_inactive_code");
+  const codeCheck = assertPasswordResetCodeUsable({ codeRow, nowMs: now });
+  if (!codeCheck.ok) {
+    logPasswordResetMaskedReason(identity, codeCheck.reason);
     return res.json({ success: true, message: PASSWORD_RESET_GENERIC_MESSAGE });
   }
 
-  const expiresTs = new Date(codeRow.expiresAt).getTime();
-  if (!Number.isFinite(expiresTs) || expiresTs < now) {
-    deactivatePasswordResetCode(codeRow.id);
-    logPasswordResetMaskedReason(identity, "expired_code");
-    return res.json({ success: true, message: PASSWORD_RESET_GENERIC_MESSAGE });
-  }
-
-  const meta = createPassword(newPassword);
-  const ts = nowIso();
-  transaction(() => {
-    userRepository.updatePassword({
-      id: user.id,
-      passwordSalt: meta.salt,
-      passwordHash: meta.hash,
-      updatedAt: ts,
-    });
-    userRepository.bumpTokenVersion({
-      id: user.id,
-      updatedAt: ts,
-    });
-    refreshTokenRepository.revokeAllByUserId({
-      userId: user.id,
-      revokedAt: ts,
-    });
-
-    userRepository.usePasswordResetCode({
-      id: codeRow.id,
-      usedAt: ts,
-    });
+  applyPasswordReset({
+    user,
+    codeRow,
+    newPassword,
   });
   disconnectUserSockets(user.id, "Password reset");
 
