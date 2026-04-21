@@ -1,10 +1,7 @@
 import { Router } from "express";
 import crypto from "node:crypto";
 import { z } from "zod";
-import {
-  createPassword,
-  verifyPassword,
-} from "../lib/crypto.js";
+import { createPassword } from "../lib/crypto.js";
 import { validatePasswordStrengthAsync } from "../lib/passwordPolicy.js";
 import { nowIso, randomId, secureId } from "../db/sql.js";
 import { authRequired } from "../middleware/auth.js";
@@ -39,13 +36,6 @@ import {
   passwordResetBodySchema,
   registerBodySchema,
 } from "../modules/auth/authSchemas.js";
-import {
-  createMfaSetupPayload,
-  decryptMfaSecret,
-  encryptMfaSecret,
-  verifyAndConsumeRecoveryCode,
-  verifyTotpCode,
-} from "../services/mfaService.js";
 import { recordSecurityEvent } from "../services/securityEventService.js";
 import {
   attachReferralAttributionOnRegister,
@@ -92,12 +82,19 @@ import {
 } from "../modules/auth/mfaChallenge.js";
 import {
   applyMfaResetByLink,
+  buildMfaSetupResponse,
+  createMfaSetup,
+  disableUserMfa,
+  enableUserMfa,
   issueLoginMfaChallenge,
   issueMfaResetLinkToken,
   MFA_RESET_LINK_TTL_SECONDS,
   resolveMfaLoginChallenge,
   resolveMfaResetLinkRequest,
+  verifyMfaAccountPassword,
+  verifyMfaDisableRequest,
   verifyMfaLoginCredentials,
+  verifyMfaSetupCode,
 } from "../modules/auth/mfaService.js";
 import {
   isLocalMfaResetRequest,
@@ -1142,25 +1139,17 @@ router.post(
   authRequired,
   validateRequest({ body: mfaSetupBodySchema }),
   (req, res) => {
-    const userPwd = userRepository.findPasswordById(req.auth.user.id);
     const password = String(req.body?.password || "");
-    const ok = Boolean(
-      userPwd
-      && verifyPassword(password, userPwd.passwordSalt, userPwd.passwordHash),
-    );
-    if (!ok) {
+    if (!verifyMfaAccountPassword({ userId: req.auth.user.id, password })) {
       return res.status(400).json({ success: false, message: "当前密码错误" });
     }
 
-    const setup = createMfaSetupPayload({
+    const setup = createMfaSetup({
       username: req.auth.user.username,
     });
     return res.json({
       success: true,
-      data: {
-        secret: setup.secret,
-        otpauthUrl: setup.otpauthUrl,
-      },
+      data: buildMfaSetupResponse(setup),
     });
   },
 );
@@ -1170,31 +1159,21 @@ router.post(
   authRequired,
   validateRequest({ body: mfaEnableBodySchema }),
   (req, res) => {
-    const userPwd = userRepository.findPasswordById(req.auth.user.id);
     const password = String(req.body?.password || "");
-    const ok = Boolean(
-      userPwd
-      && verifyPassword(password, userPwd.passwordSalt, userPwd.passwordHash),
-    );
-    if (!ok) {
+    if (!verifyMfaAccountPassword({ userId: req.auth.user.id, password })) {
       return res.status(400).json({ success: false, message: "当前密码错误" });
     }
 
     const secret = String(req.body?.secret || "").trim();
     const totpCode = String(req.body?.totpCode || "").trim();
-    if (!verifyTotpCode({ secret, code: totpCode })) {
+    if (!verifyMfaSetupCode({ secret, totpCode })) {
       return res.status(400).json({ success: false, message: "验证码无效，请检查时间同步后重试" });
     }
 
-    const setup = createMfaSetupPayload({
+    const setup = enableUserMfa({
+      userId: req.auth.user.id,
       username: req.auth.user.username,
-    });
-    userRepository.updateMfaSettings({
-      id: req.auth.user.id,
-      mfaEnabled: true,
-      mfaTotpSecretEnc: encryptMfaSecret(secret),
-      mfaRecoveryCodesHash: JSON.stringify(setup.recoveryCodeHashes),
-      updatedAt: nowIso(),
+      secret,
     });
     recordSecurityEvent({
       userId: req.auth.user.id,
@@ -1218,38 +1197,23 @@ router.post(
   authRequired,
   validateRequest({ body: mfaDisableBodySchema }),
   (req, res) => {
-    const userPwd = userRepository.findPasswordById(req.auth.user.id);
     const password = String(req.body?.password || "");
-    const ok = Boolean(
-      userPwd
-      && verifyPassword(password, userPwd.passwordSalt, userPwd.passwordHash),
-    );
-    if (!ok) {
+    if (!verifyMfaAccountPassword({ userId: req.auth.user.id, password })) {
       return res.status(400).json({ success: false, message: "当前密码错误" });
     }
 
-    const user = userRepository.findById(req.auth.user.id);
-    const secret = decryptMfaSecret(user?.mfaTotpSecretEnc || "");
-    let passed = false;
     const totpCode = String(req.body?.totpCode || "").trim();
     const recoveryCode = String(req.body?.recoveryCode || "").trim();
-    if (totpCode && secret) {
-      passed = verifyTotpCode({ secret, code: totpCode });
-    } else if (recoveryCode) {
-      const recoveryResult = verifyAndConsumeRecoveryCode({
-        inputCode: recoveryCode,
-        recoveryCodeHashesJson: user?.mfaRecoveryCodesHash || "[]",
-      });
-      passed = recoveryResult.ok;
-    }
-    if (!passed) {
+    const disableCheck = verifyMfaDisableRequest({
+      userId: req.auth.user.id,
+      totpCode,
+      recoveryCode,
+    });
+    if (!disableCheck.ok) {
       return res.status(400).json({ success: false, message: "验证码或恢复码无效" });
     }
 
-    userRepository.disableMfa({
-      id: req.auth.user.id,
-      updatedAt: nowIso(),
-    });
+    disableUserMfa({ userId: req.auth.user.id });
     recordSecurityEvent({
       userId: req.auth.user.id,
       eventType: "mfa_disabled",

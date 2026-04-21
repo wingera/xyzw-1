@@ -32,6 +32,12 @@ test("auth service seam exposes thin wrappers for future route extraction", () =
   assert.equal(typeof mfaService.issueMfaResetLinkToken, "function");
   assert.equal(typeof mfaService.verifyMfaResetLinkToken, "function");
   assert.equal(typeof mfaService.applyMfaResetByLink, "function");
+  assert.equal(typeof mfaService.createMfaSetup, "function");
+  assert.equal(typeof mfaService.buildMfaSetupResponse, "function");
+  assert.equal(typeof mfaService.verifyMfaSetupCode, "function");
+  assert.equal(typeof mfaService.enableUserMfa, "function");
+  assert.equal(typeof mfaService.verifyMfaDisableRequest, "function");
+  assert.equal(typeof mfaService.disableUserMfa, "function");
   assert.equal(typeof mfaService.MFA_RESET_LINK_TTL_SECONDS, "number");
 
   assert.equal(typeof passwordResetService.findPasswordResetUser, "function");
