@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import http from "node:http";
 import express from "express";
 import { createApp } from "../src/app/createApp.js";
 import { env } from "../src/config/env.js";
@@ -258,6 +259,46 @@ const callMfaResetByLink = async ({ baseUrl, token }) => {
     response,
     payload: await response.json(),
   };
+};
+
+const callMfaResetByLinkWithHost = async ({ baseUrl, token, host }) => {
+  const url = new URL(`${baseUrl}/api/v1/auth/mfa/reset-by-link`);
+  const body = JSON.stringify({ token });
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+          "user-agent": "auth-route-characterization",
+          host,
+        },
+      },
+      (response) => {
+        let raw = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          raw += chunk;
+        });
+        response.on("end", () => {
+          try {
+            resolve({
+              response,
+              payload: JSON.parse(raw),
+            });
+          } catch (error) {
+            reject(error);
+          }
+        });
+      },
+    );
+    request.on("error", reject);
+    request.end(body);
+  });
 };
 
 test("POST /auth/login preserves success response shape and auth cookies", async (t) => {
@@ -1131,4 +1172,59 @@ test("POST /auth/mfa/reset-by-link preserves invalid, expired, stale, and alread
   )[0];
   assert.equal(Number(disabledAfter.mfaEnabled), 0);
   assert.equal(Number(disabledAfter.tokenVersion), 0);
+});
+
+test("POST /auth/mfa/reset-by-link preserves remote admin rejection", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const adminUser = {
+    id: `route_mfa_reset_admin_${suffix}`,
+    username: `route_mfa_reset_admin_${suffix}`,
+    password: "RouteMfaResetAdmin123!Aa",
+    secret: "JBSWY3DPEHPK3PXP",
+  };
+  seedUser({
+    userId: adminUser.id,
+    username: adminUser.username,
+    password: adminUser.password,
+    mfaEnabled: true,
+    mfaSecret: adminUser.secret,
+    isAdmin: true,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(adminUser.id);
+  });
+
+  assert.equal(MFA_RESET_LINK_TTL_SECONDS, 60 * 60);
+  const resetToken = issueMfaResetLinkToken(
+    {
+      id: adminUser.id,
+      username: adminUser.username,
+      tokenVersion: 0,
+      mfaEnabled: true,
+    },
+    { requestedBy: "admin_user" },
+  );
+  assert.equal(typeof resetToken, "string");
+
+  const result = await callMfaResetByLinkWithHost({
+    baseUrl: makeBaseUrl(server),
+    token: resetToken,
+    host: "admin.example.com",
+  });
+
+  assert.equal(result.response.statusCode, 403);
+  assert.deepEqual(result.payload, {
+    success: false,
+    message: "管理员账号的二次验证重置仅允许在本地 127.0.0.1 环境执行",
+  });
+  const row = query(
+    `SELECT mfa_enabled as mfaEnabled, token_version as tokenVersion FROM users WHERE id = $id`,
+    { $id: adminUser.id },
+  )[0];
+  assert.equal(Number(row.mfaEnabled), 1);
+  assert.equal(Number(row.tokenVersion), 0);
 });
