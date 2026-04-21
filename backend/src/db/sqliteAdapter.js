@@ -53,22 +53,6 @@ const appendWriteSafetyLog = (entry) => {
   }
 };
 
-const toSafeString = (value) => {
-  if (value === undefined) return null;
-  if (value === null) return null;
-  if (typeof value === "string") {
-    return value;
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return "[unserializable]";
-  }
-};
-
 const isSensitiveKey = (key) => SENSITIVE_KEYWORDS.some((keyword) => key.includes(keyword));
 
 const truncateString = (value) => {
@@ -82,7 +66,22 @@ const sanitizeParamValue = (key, value) => {
   if (isSensitiveKey(normalizedKey)) {
     return "[redacted]";
   }
-  return truncateString(toSafeString(value));
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (Buffer.isBuffer(value)) {
+    return "[buffer]";
+  }
+  if (Array.isArray(value)) {
+    return "[array]";
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return `[${typeof value}]`;
+  }
+  if (typeof value === "string") {
+    return "[string]";
+  }
+  return "[object]";
 };
 
 const sanitizeParams = (params) => {
