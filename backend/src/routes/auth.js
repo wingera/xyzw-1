@@ -5,7 +5,6 @@ import {
   createPassword,
   sha256Hex,
   verifyPassword,
-  verifyPasswordDetails,
 } from "../lib/crypto.js";
 import { validatePasswordStrengthAsync } from "../lib/passwordPolicy.js";
 import { nowIso, randomId, secureId } from "../db/sql.js";
@@ -40,7 +39,7 @@ import {
   mfaVerifyBodySchema,
   passwordResetBodySchema,
   registerBodySchema,
-} from "../contracts/hardeningSchemas.js";
+} from "../modules/auth/authSchemas.js";
 import {
   createMfaSetupPayload,
   decryptMfaSecret,
@@ -54,12 +53,6 @@ import {
   normalizeReferralCode,
 } from "../services/referralService.js";
 import {
-  buildAuthorizeUrl,
-  exchangeCodeForAccessToken,
-  fetchWechatUserProfile,
-  isWechatOpenConfigured,
-} from "../services/wechatOpenAuthService.js";
-import {
   buildAccessToken,
   inferRememberMeFromRefreshRecord,
 } from "../modules/auth/tokens.js";
@@ -72,31 +65,55 @@ import {
 } from "../modules/auth/cookies.js";
 import {
   buildAuthUserPayload,
-  getLoginBlockedError,
   issueLoginSession,
   reqMeta,
   rotateRefreshToken,
 } from "../modules/auth/session.js";
+import {
+  findAuthUserByIdentity,
+  getAuthLoginBlockedError,
+  upgradeAuthPasswordIfNeeded,
+  verifyAuthPassword,
+} from "../modules/auth/authService.js";
+import {
+  findSessionUserById,
+  isRefreshTokenVersionCurrent,
+  isSessionTrialExpired,
+} from "../modules/auth/sessionService.js";
 import {
   cleanupExpiredMfaQrSessions,
   createMfaQrSession,
   deleteMfaQrSession,
   getMfaChallengeUser,
   getMfaQrSession,
-  issueMfaChallengeToken,
-  issueMfaResetLinkToken,
-  MFA_RESET_LINK_TTL_SECONDS,
-  parseMfaResetLinkToken,
   saveMfaQrSession,
   verifyMfaCredentials,
 } from "../modules/auth/mfaChallenge.js";
+import {
+  createMfaLoginChallenge,
+  issueMfaResetLinkToken,
+  MFA_RESET_LINK_TTL_SECONDS,
+  parseMfaResetLinkToken,
+  resolveMfaLoginChallenge,
+  verifyMfaLoginCredentials,
+} from "../modules/auth/mfaService.js";
 import {
   isLocalMfaResetRequest,
   logPasswordResetMaskedReason,
   maskIdentity,
   PASSWORD_RESET_GENERIC_MESSAGE,
 } from "../modules/auth/passwordReset.js";
+import {
+  deactivatePasswordResetCode,
+  findPasswordResetCode,
+  findPasswordResetUser,
+} from "../modules/auth/passwordResetService.js";
 import { buildCsrfResponseData } from "../modules/auth/csrf.js";
+import {
+  buildWechatAuthorizeUrl,
+  isWechatAuthConfigured,
+  loadWechatUserProfileByCode,
+} from "../modules/auth/wechatAuthService.js";
 
 const router = Router();
 router.get("/temporary-invites", (_req, res) => {
@@ -208,7 +225,7 @@ const createWechatAuthFlow = ({ intent, rememberMe = false, userId = null }) => 
   });
   return {
     flowId,
-    authorizeUrl: buildAuthorizeUrl({ state: flowId }),
+    authorizeUrl: buildWechatAuthorizeUrl({ state: flowId }),
   };
 };
 
@@ -296,21 +313,6 @@ const sendWechatCallbackHtml = (res, payload) => {
   </script>
 </body>
 </html>`);
-};
-
-const loadWechatUserProfileByCode = async (code) => {
-  const exchanged = await exchangeCodeForAccessToken(code);
-  const profile = await fetchWechatUserProfile({
-    accessToken: exchanged.accessToken,
-    openId: exchanged.openId,
-  });
-  return {
-    openId: String(profile.openId || exchanged.openId || "").trim(),
-    unionId: String(profile.unionId || exchanged.unionId || "").trim(),
-    nickname: String(profile.nickname || "").trim(),
-    avatarUrl: String(profile.avatarUrl || "").trim(),
-    appId: String(profile.appId || "").trim(),
-  };
 };
 
 const isWechatBindingConflictError = (error) => {
@@ -506,10 +508,8 @@ router.post("/login", loginLimiter, validateRequest({ body: loginBodySchema }), 
   const { username, password } = req.body;
   const rememberMe = Boolean(req.body?.rememberMe);
 
-  const user = userRepository.findByIdentity(username);
-  const passwordCheck = user
-    ? verifyPasswordDetails(password, user.passwordSalt, user.passwordHash)
-    : { ok: false, needsUpgrade: false };
+  const user = findAuthUserByIdentity(username);
+  const passwordCheck = verifyAuthPassword({ user, password });
 
   if (!user || !passwordCheck.ok) {
     recordSecurityEvent({
@@ -524,16 +524,8 @@ router.post("/login", loginLimiter, validateRequest({ body: loginBodySchema }), 
     return errorResponse(res, 401, "AUTH_INVALID_CREDENTIALS", "用户名或密码错误");
   }
 
-  if (passwordCheck.needsUpgrade) {
-    const upgraded = createPassword(password);
-    userRepository.updatePassword({
-      id: user.id,
-      passwordSalt: upgraded.salt,
-      passwordHash: upgraded.hash,
-      updatedAt: nowIso(),
-    });
-  }
-  const blocked = getLoginBlockedError(user);
+  upgradeAuthPasswordIfNeeded({ user, password, passwordCheck });
+  const blocked = getAuthLoginBlockedError(user);
   if (blocked) {
     recordSecurityEvent({
       userId: user.id,
@@ -550,7 +542,8 @@ router.post("/login", loginLimiter, validateRequest({ body: loginBodySchema }), 
   }
 
   if (user.mfaEnabled) {
-    const mfaChallengeToken = issueMfaChallengeToken(user, {
+    const mfaChallengeToken = createMfaLoginChallenge({
+      user,
       rememberMe,
       loginMethod: "password+mfa",
     });
@@ -583,7 +576,7 @@ router.post(
   "/wechat/login/start",
   validateRequest({ body: wechatLoginStartBodySchema }),
   (req, res) => {
-    if (!isWechatOpenConfigured()) {
+    if (!isWechatAuthConfigured()) {
       return errorResponse(
         res,
         503,
@@ -607,7 +600,7 @@ router.post(
 );
 
 router.post("/wechat/bind/start", authRequired, (req, res) => {
-  if (!isWechatOpenConfigured()) {
+  if (!isWechatAuthConfigured()) {
     return errorResponse(
       res,
       503,
@@ -650,7 +643,7 @@ router.get("/wechat/callback", async (req, res) => {
     );
 
   try {
-    if (!isWechatOpenConfigured()) {
+    if (!isWechatAuthConfigured()) {
       return callbackFailure({
         message: "微信登录暂未配置",
         errorCode: "AUTH_WECHAT_NOT_CONFIGURED",
@@ -816,7 +809,7 @@ router.get("/wechat/callback", async (req, res) => {
       });
     }
 
-    const blocked = getLoginBlockedError(user);
+    const blocked = getAuthLoginBlockedError(user);
     if (blocked) {
       recordSecurityEvent({
         userId: user.id,
@@ -831,7 +824,8 @@ router.get("/wechat/callback", async (req, res) => {
     }
 
     if (user.mfaEnabled) {
-      const mfaChallengeToken = issueMfaChallengeToken(user, {
+      const mfaChallengeToken = createMfaLoginChallenge({
+        user,
         rememberMe: Boolean(flow.rememberMe),
         loginMethod: "wechat+mfa",
       });
@@ -884,7 +878,7 @@ router.get("/wechat/callback", async (req, res) => {
 });
 
 router.get("/wechat/binding", authRequired, (req, res) => {
-  if (!isWechatOpenConfigured()) {
+  if (!isWechatAuthConfigured()) {
     return errorResponse(
       res,
       503,
@@ -909,7 +903,7 @@ router.get("/wechat/binding", authRequired, (req, res) => {
 });
 
 router.post("/wechat/unbind", authRequired, userSensitiveActionRequired, (req, res) => {
-  if (!isWechatOpenConfigured()) {
+  if (!isWechatAuthConfigured()) {
     return errorResponse(
       res,
       503,
@@ -950,7 +944,7 @@ router.post(
       return res.status(400).json({ success: false, message: "请输入验证码或恢复码" });
     }
 
-    const challengeCheck = getMfaChallengeUser(mfaChallengeToken);
+    const challengeCheck = resolveMfaLoginChallenge(mfaChallengeToken);
     if (!challengeCheck.ok) {
       recordSecurityEvent({
         userId: null,
@@ -968,7 +962,7 @@ router.post(
 
     const { user, secret } = challengeCheck;
 
-    const passed = verifyMfaCredentials({
+    const passed = verifyMfaLoginCredentials({
       user,
       secret,
       totpCode,
@@ -1391,16 +1385,16 @@ router.post("/password-reset", resetPasswordLimiter, validateRequest({ body: pas
     return res.status(400).json({ success: false, message: passwordCheck.message });
   }
 
-  const user = userRepository.findByIdentity(identity);
+  const user = findPasswordResetUser(identity);
   if (!user) {
     logPasswordResetMaskedReason(identity, "user_not_found");
     return res.json({ success: true, message: PASSWORD_RESET_GENERIC_MESSAGE });
   }
 
   const now = Date.now();
-  const codeRow = userRepository.findLatestPasswordResetCode({
+  const codeRow = findPasswordResetCode({
     userId: user.id,
-    code: shortCode,
+    shortCode,
   });
 
   if (!codeRow || Number(codeRow.isActive) !== 1 || codeRow.usedAt) {
@@ -1410,7 +1404,7 @@ router.post("/password-reset", resetPasswordLimiter, validateRequest({ body: pas
 
   const expiresTs = new Date(codeRow.expiresAt).getTime();
   if (!Number.isFinite(expiresTs) || expiresTs < now) {
-    userRepository.deactivatePasswordResetCode(codeRow.id);
+    deactivatePasswordResetCode(codeRow.id);
     logPasswordResetMaskedReason(identity, "expired_code");
     return res.json({ success: true, message: PASSWORD_RESET_GENERIC_MESSAGE });
   }
@@ -1490,13 +1484,13 @@ router.post("/refresh", refreshLimiter, (req, res) => {
       return errorResponse(res, 401, "AUTH_REFRESH_EXPIRED", "登录状态已过期，请重新登录");
     }
 
-    const user = userRepository.findById(record.userId);
+    const user = findSessionUserById(record.userId);
     if (!user) {
       clearRefreshCookie(req, res);
       clearAccessCookie(req, res);
       return errorResponse(res, 401, "AUTH_USER_NOT_FOUND", "用户不存在或已失效");
     }
-    if (Number(record.tokenVersion ?? 0) !== Number(user.tokenVersion ?? 0)) {
+    if (!isRefreshTokenVersionCurrent({ refreshTokenRecord: record, user })) {
       refreshTokenRepository.revokeById({
         id: record.id,
         revokedAt: nowIso(),
@@ -1508,11 +1502,7 @@ router.post("/refresh", refreshLimiter, (req, res) => {
       clearAccessCookie(req, res);
       return errorResponse(res, 401, "AUTH_REFRESH_REVOKED", "登录状态已失效，请重新登录");
     }
-    if (
-      user.trialExpiresAt
-      && Number.isFinite(new Date(user.trialExpiresAt).getTime())
-      && new Date(user.trialExpiresAt).getTime() < Date.now()
-    ) {
+    if (isSessionTrialExpired(user)) {
       clearRefreshCookie(req, res);
       clearAccessCookie(req, res);
       return errorResponse(res, 403, "AUTH_TRIAL_EXPIRED", "账号试用已到期，请联系管理员");
