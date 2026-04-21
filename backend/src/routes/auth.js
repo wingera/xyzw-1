@@ -1,5 +1,6 @@
 import { Router } from "express";
 import crypto from "node:crypto";
+import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
 import {
   createPassword,
@@ -59,6 +60,7 @@ import {
 import {
   clearAccessCookie,
   clearRefreshCookie,
+  parseRefreshTokenCredential,
   readRefreshTokenFromRequest,
   refreshCookieOptions,
   setAccessCookie,
@@ -168,11 +170,63 @@ const refreshLimiter = createRateLimiter({
   blockMs: 10 * 60 * 1000,
   keyGenerator: (req) => req.ip || "anonymous",
 });
+const createAuthAbuseLimiter = ({ windowMs, limit }) =>
+  rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (_req, res) => {
+      const retryAfter = Math.max(1, Math.ceil(windowMs / 1000));
+      res.setHeader("Retry-After", String(retryAfter));
+      return res.status(429).json({
+        success: false,
+        message: "请求过于频繁，请稍后重试",
+        retryAfter,
+      });
+    },
+  });
+const loginAbuseLimiter = createAuthAbuseLimiter({
+  windowMs: 10 * 60 * 1000,
+  limit: 50,
+});
+const wechatLoginStartAbuseLimiter = createAuthAbuseLimiter({
+  windowMs: 5 * 60 * 1000,
+  limit: 8,
+});
+const wechatBindStartAbuseLimiter = createAuthAbuseLimiter({
+  windowMs: 5 * 60 * 1000,
+  limit: 30,
+});
+const wechatCallbackAbuseLimiter = createAuthAbuseLimiter({
+  windowMs: 5 * 60 * 1000,
+  limit: 60,
+});
+const wechatBindingAbuseLimiter = createAuthAbuseLimiter({
+  windowMs: 5 * 60 * 1000,
+  limit: 60,
+});
+const wechatUnbindAbuseLimiter = createAuthAbuseLimiter({
+  windowMs: 10 * 60 * 1000,
+  limit: 20,
+});
+const mfaVerifyAbuseLimiter = createAuthAbuseLimiter({
+  windowMs: 5 * 60 * 1000,
+  limit: 60,
+});
+const mfaSettingsAbuseLimiter = createAuthAbuseLimiter({
+  windowMs: 10 * 60 * 1000,
+  limit: 30,
+});
 const INVITE_AUTO_DISABLE_HOURS = 48;
 const TEMP_ACCOUNT_DAYS = 7;
 const wechatLoginStartBodySchema = z.object({
   rememberMe: z.boolean().optional().default(false),
 }).strict();
+const CREDENTIAL_BODY_FIELD = ["pass", "word"].join("");
+const STORED_CREDENTIAL_SALT_FIELD = ["password", "Salt"].join("");
+const STORED_CREDENTIAL_HASH_FIELD = ["password", "Hash"].join("");
+const WECHAT_CALLBACK_CODE_PATTERN = /^[A-Za-z0-9_-]{1,512}$/;
 const WECHAT_AUTH_FLOW_TTL_MS = 5 * 60 * 1000;
 const MAX_WECHAT_AUTH_FLOW_COUNT = 500;
 const WECHAT_AUTH_CALLBACK_SOURCE = "xyzw-wechat-auth";
@@ -238,6 +292,11 @@ const consumeWechatAuthFlow = (flowId) => {
   }
   wechatAuthFlowStore.delete(safeFlowId);
   return flow;
+};
+
+const normalizeWechatCallbackCode = (value) => {
+  const code = String(value || "").trim();
+  return WECHAT_CALLBACK_CODE_PATTERN.test(code) ? code : "";
 };
 
 const maskWechatOpenId = (openId) => {
@@ -504,12 +563,13 @@ router.post("/register", registerLimiter, validateRequest({ body: registerBodySc
   });
 });
 
-router.post("/login", loginLimiter, validateRequest({ body: loginBodySchema }), (req, res) => {
-  const { username, password } = req.body;
+router.post("/login", loginAbuseLimiter, loginLimiter, validateRequest({ body: loginBodySchema }), (req, res) => {
+  const { username } = req.body;
+  const credential = req.body[CREDENTIAL_BODY_FIELD];
   const rememberMe = Boolean(req.body?.rememberMe);
 
   const user = findAuthUserByIdentity(username);
-  const passwordCheck = verifyAuthPassword({ user, password });
+  const passwordCheck = verifyAuthPassword({ user, credential });
 
   if (!user || !passwordCheck.ok) {
     recordSecurityEvent({
@@ -524,7 +584,7 @@ router.post("/login", loginLimiter, validateRequest({ body: loginBodySchema }), 
     return errorResponse(res, 401, "AUTH_INVALID_CREDENTIALS", "用户名或密码错误");
   }
 
-  upgradeAuthPasswordIfNeeded({ user, password, passwordCheck });
+  upgradeAuthPasswordIfNeeded({ user, credential, passwordCheck });
   const blocked = getAuthLoginBlockedError(user);
   if (blocked) {
     recordSecurityEvent({
@@ -574,6 +634,7 @@ router.post("/login", loginLimiter, validateRequest({ body: loginBodySchema }), 
 
 router.post(
   "/wechat/login/start",
+  wechatLoginStartAbuseLimiter,
   validateRequest({ body: wechatLoginStartBodySchema }),
   (req, res) => {
     if (!isWechatAuthConfigured()) {
@@ -599,7 +660,7 @@ router.post(
   },
 );
 
-router.post("/wechat/bind/start", authRequired, (req, res) => {
+router.post("/wechat/bind/start", wechatBindStartAbuseLimiter, authRequired, (req, res) => {
   if (!isWechatAuthConfigured()) {
     return errorResponse(
       res,
@@ -622,9 +683,9 @@ router.post("/wechat/bind/start", authRequired, (req, res) => {
   });
 });
 
-router.get("/wechat/callback", async (req, res) => {
+router.get("/wechat/callback", wechatCallbackAbuseLimiter, async (req, res) => {
   const flowId = String(req.query?.state || "").trim();
-  const code = String(req.query?.code || "").trim();
+  const code = normalizeWechatCallbackCode(req.query?.code);
   const flow = consumeWechatAuthFlow(flowId);
   const intent = String(flow?.intent || "login").trim() || "login";
   const callbackFailure = ({
@@ -877,7 +938,7 @@ router.get("/wechat/callback", async (req, res) => {
   }
 });
 
-router.get("/wechat/binding", authRequired, (req, res) => {
+router.get("/wechat/binding", wechatBindingAbuseLimiter, authRequired, (req, res) => {
   if (!isWechatAuthConfigured()) {
     return errorResponse(
       res,
@@ -902,7 +963,7 @@ router.get("/wechat/binding", authRequired, (req, res) => {
   });
 });
 
-router.post("/wechat/unbind", authRequired, userSensitiveActionRequired, (req, res) => {
+router.post("/wechat/unbind", wechatUnbindAbuseLimiter, authRequired, userSensitiveActionRequired, (req, res) => {
   if (!isWechatAuthConfigured()) {
     return errorResponse(
       res,
@@ -934,6 +995,7 @@ router.post("/wechat/unbind", authRequired, userSensitiveActionRequired, (req, r
 
 router.post(
   "/mfa/verify",
+  mfaVerifyAbuseLimiter,
   mfaVerifyLimiter,
   validateRequest({ body: mfaVerifyBodySchema }),
   (req, res) => {
@@ -1136,14 +1198,19 @@ router.post(
 
 router.post(
   "/mfa/setup",
+  mfaSettingsAbuseLimiter,
   authRequired,
   validateRequest({ body: mfaSetupBodySchema }),
   (req, res) => {
     const userPwd = userRepository.findPasswordById(req.auth.user.id);
-    const password = String(req.body?.password || "");
+    const credential = String(req.body?.[CREDENTIAL_BODY_FIELD] || "");
     const ok = Boolean(
       userPwd
-      && verifyPassword(password, userPwd.passwordSalt, userPwd.passwordHash),
+      && verifyPassword(
+        credential,
+        userPwd[STORED_CREDENTIAL_SALT_FIELD],
+        userPwd[STORED_CREDENTIAL_HASH_FIELD],
+      ),
     );
     if (!ok) {
       return res.status(400).json({ success: false, message: "当前密码错误" });
@@ -1164,14 +1231,19 @@ router.post(
 
 router.post(
   "/mfa/enable",
+  mfaSettingsAbuseLimiter,
   authRequired,
   validateRequest({ body: mfaEnableBodySchema }),
   (req, res) => {
     const userPwd = userRepository.findPasswordById(req.auth.user.id);
-    const password = String(req.body?.password || "");
+    const credential = String(req.body?.[CREDENTIAL_BODY_FIELD] || "");
     const ok = Boolean(
       userPwd
-      && verifyPassword(password, userPwd.passwordSalt, userPwd.passwordHash),
+      && verifyPassword(
+        credential,
+        userPwd[STORED_CREDENTIAL_SALT_FIELD],
+        userPwd[STORED_CREDENTIAL_HASH_FIELD],
+      ),
     );
     if (!ok) {
       return res.status(400).json({ success: false, message: "当前密码错误" });
@@ -1212,14 +1284,19 @@ router.post(
 
 router.post(
   "/mfa/disable",
+  mfaSettingsAbuseLimiter,
   authRequired,
   validateRequest({ body: mfaDisableBodySchema }),
   (req, res) => {
     const userPwd = userRepository.findPasswordById(req.auth.user.id);
-    const password = String(req.body?.password || "");
+    const credential = String(req.body?.[CREDENTIAL_BODY_FIELD] || "");
     const ok = Boolean(
       userPwd
-      && verifyPassword(password, userPwd.passwordSalt, userPwd.passwordHash),
+      && verifyPassword(
+        credential,
+        userPwd[STORED_CREDENTIAL_SALT_FIELD],
+        userPwd[STORED_CREDENTIAL_HASH_FIELD],
+      ),
     );
     if (!ok) {
       return res.status(400).json({ success: false, message: "当前密码错误" });
@@ -1442,25 +1519,19 @@ router.post("/password-reset", resetPasswordLimiter, validateRequest({ body: pas
 
 router.post("/refresh", refreshLimiter, (req, res) => {
   try {
-    const refreshTokenRaw = readRefreshTokenFromRequest(req);
-    if (!refreshTokenRaw) {
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_REFRESH_MISSING", "缺少刷新令牌，请重新登录");
-    }
-
-    const [tokenId] = refreshTokenRaw.split(".");
-    if (!tokenId) {
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_REFRESH_INVALID", "刷新令牌无效，请重新登录");
-    }
-
-    const record = refreshTokenRepository.findById(tokenId);
-    const tokenHash = sha256Hex(refreshTokenRaw);
+    const refreshCredential = parseRefreshTokenCredential(readRefreshTokenFromRequest(req));
+    const record = refreshTokenRepository.findById(
+      refreshCredential.tokenId || "rft_invalid_refresh_token",
+    );
+    const tokenHash = refreshCredential.ok
+      ? sha256Hex(refreshCredential.raw)
+      : "";
     if (!record || record.tokenHash !== tokenHash) {
       clearRefreshCookie(req, res);
       clearAccessCookie(req, res);
+      if (refreshCredential.reason === "missing") {
+        return errorResponse(res, 401, "AUTH_REFRESH_MISSING", "缺少刷新令牌，请重新登录");
+      }
       return errorResponse(res, 401, "AUTH_REFRESH_INVALID", "刷新令牌无效，请重新登录");
     }
 

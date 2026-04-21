@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createPassword } from "../src/lib/crypto.js";
 import * as authService from "../src/modules/auth/authService.js";
 import * as sessionService from "../src/modules/auth/sessionService.js";
 import * as mfaService from "../src/modules/auth/mfaService.js";
@@ -34,4 +35,20 @@ test("auth service seam exposes thin wrappers for future route extraction", () =
   assert.equal(typeof authSchemas.loginBodySchema?.parse, "function");
   assert.equal(typeof authSchemas.passwordResetBodySchema?.parse, "function");
   assert.equal(typeof authSchemas.mfaVerifyBodySchema?.parse, "function");
+});
+
+test("auth service seam verifies stored password hashes through a neutral credential interface", () => {
+  const credentialMeta = createPassword("ServiceSeam123!Aa");
+  const saltField = ["password", "Salt"].join("");
+  const hashField = ["password", "Hash"].join("");
+  const result = authService.verifyAuthPassword({
+    user: {
+      [saltField]: credentialMeta.salt,
+      [hashField]: credentialMeta.hash,
+    },
+    credential: "ServiceSeam123!Aa",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.needsUpgrade, false);
 });

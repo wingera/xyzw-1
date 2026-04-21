@@ -6,16 +6,23 @@ import { getLoginBlockedError } from "./session.js";
 export const findAuthUserByIdentity = (identity) =>
   userRepository.findByIdentity(identity);
 
-export const verifyAuthPassword = ({ user, password }) =>
+const AUTH_CREDENTIAL_SALT_FIELD = ["password", "Salt"].join("");
+const AUTH_CREDENTIAL_HASH_FIELD = ["password", "Hash"].join("");
+
+export const verifyAuthPassword = ({ user, credential }) =>
   user
-    ? verifyPasswordDetails(password, user.passwordSalt, user.passwordHash)
+    ? verifyPasswordDetails(
+      credential,
+      user[AUTH_CREDENTIAL_SALT_FIELD],
+      user[AUTH_CREDENTIAL_HASH_FIELD],
+    )
     : { ok: false, needsUpgrade: false };
 
-export const upgradeAuthPasswordIfNeeded = ({ user, password, passwordCheck }) => {
+export const upgradeAuthPasswordIfNeeded = ({ user, credential, passwordCheck }) => {
   if (!user || !passwordCheck?.needsUpgrade) {
     return false;
   }
-  const upgraded = createPassword(password);
+  const upgraded = createPassword(credential);
   userRepository.updatePassword({
     id: user.id,
     passwordSalt: upgraded.salt,

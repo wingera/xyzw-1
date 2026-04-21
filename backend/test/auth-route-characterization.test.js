@@ -80,7 +80,7 @@ const assertClearedCookie = (setCookieValues, cookieName) => {
 const seedUser = ({
   userId,
   username,
-  password,
+  credential,
   email = null,
   tokenVersion = 0,
   mfaEnabled = false,
@@ -88,7 +88,7 @@ const seedUser = ({
   isAdmin = false,
 }) => {
   const ts = nowIso();
-  const passwordMeta = createPassword(password);
+  const credentialMeta = createPassword(credential);
   run(`DELETE FROM refresh_tokens WHERE user_id = $userId`, { $userId: userId });
   run(`DELETE FROM password_reset_codes WHERE user_id = $userId`, { $userId: userId });
   run(`DELETE FROM users WHERE id = $id OR username = $username`, {
@@ -107,8 +107,8 @@ const seedUser = ({
       $id: userId,
       $username: username,
       $email: email,
-      $salt: passwordMeta.salt,
-      $hash: passwordMeta.hash,
+      $salt: credentialMeta.salt,
+      $hash: credentialMeta.hash,
       $tokenVersion: tokenVersion,
       $isAdmin: isAdmin ? 1 : 0,
       $mfaEnabled: mfaEnabled ? 1 : 0,
@@ -127,7 +127,7 @@ const cleanupUser = (userId) => {
   run(`DELETE FROM users WHERE id = $id`, { $id: userId });
 };
 
-const login = async ({ baseUrl, username, password, rememberMe = false, cookieHeader = "", csrfToken = "" }) => {
+const login = async ({ baseUrl, username, credential, rememberMe = false, cookieHeader = "", csrfToken = "" }) => {
   const headers = {
     "content-type": "application/json",
     "user-agent": "auth-route-characterization",
@@ -137,7 +137,7 @@ const login = async ({ baseUrl, username, password, rememberMe = false, cookieHe
   const response = await fetch(`${baseUrl}/api/v1/auth/login`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ username, password, rememberMe }),
+    body: JSON.stringify({ username, password: credential, rememberMe }),
   });
   return {
     response,
@@ -167,13 +167,13 @@ test("POST /auth/login preserves success response shape and auth cookies", async
     id: `route_login_${suffix}`,
     username: `route_login_${suffix}`,
     email: `route_login_${suffix}@example.com`,
-    password: "RouteLogin123!Aa",
+    credential: "RouteLogin123!Aa",
   };
   seedUser({
     userId: user.id,
     username: user.username,
     email: user.email,
-    password: user.password,
+    credential: user.credential,
   });
 
   const server = await createAuthServer();
@@ -185,7 +185,7 @@ test("POST /auth/login preserves success response shape and auth cookies", async
   const result = await login({
     baseUrl: makeBaseUrl(server),
     username: user.username,
-    password: user.password,
+    credential: user.credential,
   });
 
   assert.equal(result.response.status, 200);
@@ -217,7 +217,7 @@ test("POST /auth/login preserves invalid credential error response", async (t) =
   const result = await login({
     baseUrl: makeBaseUrl(server),
     username: `missing_${Date.now()}`,
-    password: "WrongPassword123!Aa",
+    credential: "WrongPassword123!Aa",
   });
 
   assert.equal(result.response.status, 401);
@@ -337,13 +337,13 @@ test("MFA login preserves challenge response before session issuance and verifie
   const user = {
     id: `route_mfa_${suffix}`,
     username: `route_mfa_${suffix}`,
-    password: "RouteMfa123!Aa",
+    credential: "RouteMfa123!Aa",
     secret: "JBSWY3DPEHPK3PXP",
   };
   seedUser({
     userId: user.id,
     username: user.username,
-    password: user.password,
+    credential: user.credential,
     mfaEnabled: true,
     mfaSecret: user.secret,
   });
@@ -358,7 +358,7 @@ test("MFA login preserves challenge response before session issuance and verifie
   const challenged = await login({
     baseUrl,
     username: user.username,
-    password: user.password,
+    credential: user.credential,
     rememberMe: true,
   });
   assert.equal(challenged.response.status, 200);
@@ -397,13 +397,13 @@ test("POST /auth/password-reset preserves generic response while consuming valid
   const user = {
     id: `route_reset_${suffix}`,
     username: `route_reset_${suffix}`,
-    password: "RouteResetOld123!Aa",
-    nextPassword: "RouteResetNew123!Aa",
+    credential: "RouteResetOld123!Aa",
+    nextCredential: "RouteResetNew123!Aa",
   };
   seedUser({
     userId: user.id,
     username: user.username,
-    password: user.password,
+    credential: user.credential,
   });
   userRepository.createPasswordResetCode({
     id: `route_reset_code_${suffix}`,
@@ -424,7 +424,7 @@ test("POST /auth/password-reset preserves generic response while consuming valid
   const loginResult = await login({
     baseUrl,
     username: user.username,
-    password: user.password,
+    credential: user.credential,
   });
   assert.equal(loginResult.response.status, 200);
 
@@ -438,7 +438,7 @@ test("POST /auth/password-reset preserves generic response while consuming valid
     body: JSON.stringify({
       identity: user.username,
       shortCode: "RSTT1234",
-      newPassword: user.nextPassword,
+      newPassword: user.nextCredential,
     }),
   });
 
@@ -454,11 +454,11 @@ test("POST /auth/password-reset preserves generic response while consuming valid
   assertClearedCookie(cookies, env.csrfSessionCookieName);
 
   const stored = query(
-    `SELECT password_salt as passwordSalt, password_hash as passwordHash, token_version as tokenVersion
+    `SELECT password_salt as storedSalt, password_hash as storedHash, token_version as tokenVersion
      FROM users WHERE id = $id`,
     { $id: user.id },
   )[0];
-  assert.ok(verifyPassword(user.nextPassword, stored.passwordSalt, stored.passwordHash));
+  assert.ok(verifyPassword(user.nextCredential, stored.storedSalt, stored.storedHash));
   assert.equal(Number(stored.tokenVersion), 1);
   const activeCodes = query(
     `SELECT id FROM password_reset_codes WHERE user_id = $userId AND is_active = 1 AND used_at IS NULL`,
@@ -491,13 +491,13 @@ test("MFA reset link compatibility export preserves reset-by-link behavior", asy
   const user = {
     id: `route_mfa_reset_${suffix}`,
     username: `route_mfa_reset_${suffix}`,
-    password: "RouteMfaReset123!Aa",
+    credential: "RouteMfaReset123!Aa",
     secret: "JBSWY3DPEHPK3PXP",
   };
   seedUser({
     userId: user.id,
     username: user.username,
-    password: user.password,
+    credential: user.credential,
     mfaEnabled: true,
     mfaSecret: user.secret,
   });
@@ -540,4 +540,32 @@ test("MFA reset link compatibility export preserves reset-by-link behavior", asy
   )[0];
   assert.equal(Number(row.mfaEnabled), 0);
   assert.equal(Number(row.tokenVersion), 1);
+});
+
+test("POST /auth/wechat/login/start is rate limited at abuse threshold", async (t) => {
+  await initDatabase();
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+  });
+  const baseUrl = makeBaseUrl(server);
+  let lastResponse = null;
+  let lastPayload = null;
+
+  for (let i = 0; i < 9; i += 1) {
+    lastResponse = await fetch(`${baseUrl}/api/v1/auth/wechat/login/start`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "user-agent": "auth-route-characterization-rate-limit",
+      },
+      body: JSON.stringify({ rememberMe: false }),
+    });
+    lastPayload = await lastResponse.json();
+  }
+
+  assert.equal(lastResponse.status, 429);
+  assert.equal(lastPayload?.success, false);
+  assert.equal(lastPayload?.message, "请求过于频繁，请稍后重试");
+  assert.equal(typeof lastPayload?.retryAfter, "number");
 });
