@@ -3,7 +3,6 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import {
   createPassword,
-  sha256Hex,
   verifyPassword,
 } from "../lib/crypto.js";
 import { validatePasswordStrengthAsync } from "../lib/passwordPolicy.js";
@@ -67,7 +66,6 @@ import {
   buildAuthUserPayload,
   issueLoginSession,
   reqMeta,
-  rotateRefreshToken,
 } from "../modules/auth/session.js";
 import {
   findAuthUserByIdentity,
@@ -76,9 +74,12 @@ import {
   verifyAuthPassword,
 } from "../modules/auth/authService.js";
 import {
-  findSessionUserById,
-  isRefreshTokenVersionCurrent,
-  isSessionTrialExpired,
+  assertRefreshSessionUsable,
+  assertTokenVersionCurrent,
+  assertTrialActive,
+  findRefreshSessionByTokenHash,
+  getSessionUser,
+  rotateRefreshSession,
 } from "../modules/auth/sessionService.js";
 import {
   cleanupExpiredMfaQrSessions,
@@ -1440,72 +1441,67 @@ router.post("/password-reset", resetPasswordLimiter, validateRequest({ body: pas
   return res.json({ success: true, message: PASSWORD_RESET_GENERIC_MESSAGE });
 });
 
+const refreshSessionMetaFromRequest = (req) => ({
+  ip: req.ip || null,
+  userAgent: req.headers["user-agent"] || null,
+  lastUsedIp: req.ip || null,
+  lastUsedUserAgent: req.headers["user-agent"] || null,
+});
+
+const sendRefreshSessionError = (req, res, error) => {
+  clearRefreshCookie(req, res);
+  clearAccessCookie(req, res);
+  return errorResponse(
+    res,
+    Number(error?.status || 401),
+    String(error?.code || "AUTH_REFRESH_INVALID"),
+    String(error?.message || "刷新令牌无效，请重新登录"),
+  );
+};
+
 router.post("/refresh", refreshLimiter, (req, res) => {
   try {
     const refreshTokenRaw = readRefreshTokenFromRequest(req);
     if (!refreshTokenRaw) {
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_REFRESH_MISSING", "缺少刷新令牌，请重新登录");
-    }
-
-    const [tokenId] = refreshTokenRaw.split(".");
-    if (!tokenId) {
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_REFRESH_INVALID", "刷新令牌无效，请重新登录");
-    }
-
-    const record = refreshTokenRepository.findById(tokenId);
-    const tokenHash = sha256Hex(refreshTokenRaw);
-    if (!record || record.tokenHash !== tokenHash) {
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_REFRESH_INVALID", "刷新令牌无效，请重新登录");
-    }
-
-    if (record.revokedAt) {
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_REFRESH_REVOKED", "登录状态已失效，请重新登录");
-    }
-
-    const expiresTs = new Date(record.expiresAt).getTime();
-    if (!Number.isFinite(expiresTs) || expiresTs <= Date.now()) {
-      refreshTokenRepository.revokeById({
-        id: record.id,
-        revokedAt: nowIso(),
-        lastUsedAt: nowIso(),
-        lastUsedIp: req.ip || null,
-        lastUsedUserAgent: req.headers["user-agent"] || null,
+      return sendRefreshSessionError(req, res, {
+        status: 401,
+        code: "AUTH_REFRESH_MISSING",
+        message: "缺少刷新令牌，请重新登录",
       });
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_REFRESH_EXPIRED", "登录状态已过期，请重新登录");
     }
 
-    const user = findSessionUserById(record.userId);
-    if (!user) {
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_USER_NOT_FOUND", "用户不存在或已失效");
+    const lookup = findRefreshSessionByTokenHash(refreshTokenRaw);
+    if (!lookup.ok) {
+      return sendRefreshSessionError(req, res, lookup.error);
     }
-    if (!isRefreshTokenVersionCurrent({ refreshTokenRecord: record, user })) {
-      refreshTokenRepository.revokeById({
-        id: record.id,
-        revokedAt: nowIso(),
-        lastUsedAt: nowIso(),
-        lastUsedIp: req.ip || null,
-        lastUsedUserAgent: req.headers["user-agent"] || null,
-      });
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 401, "AUTH_REFRESH_REVOKED", "登录状态已失效，请重新登录");
+
+    const sessionMeta = refreshSessionMetaFromRequest(req);
+    const usable = assertRefreshSessionUsable({
+      refreshTokenRecord: lookup.record,
+      revokeMeta: sessionMeta,
+    });
+    if (!usable.ok) {
+      return sendRefreshSessionError(req, res, usable.error);
     }
-    if (isSessionTrialExpired(user)) {
-      clearRefreshCookie(req, res);
-      clearAccessCookie(req, res);
-      return errorResponse(res, 403, "AUTH_TRIAL_EXPIRED", "账号试用已到期，请联系管理员");
+
+    const sessionUser = getSessionUser(lookup.record.userId);
+    if (!sessionUser.ok) {
+      return sendRefreshSessionError(req, res, sessionUser.error);
+    }
+
+    const user = sessionUser.user;
+    const versionCheck = assertTokenVersionCurrent({
+      refreshTokenRecord: lookup.record,
+      user,
+      revokeMeta: sessionMeta,
+    });
+    if (!versionCheck.ok) {
+      return sendRefreshSessionError(req, res, versionCheck.error);
+    }
+
+    const trialCheck = assertTrialActive(user);
+    if (!trialCheck.ok) {
+      return sendRefreshSessionError(req, res, trialCheck.error);
     }
 
     const lastLoginAt = nowIso();
@@ -1515,11 +1511,11 @@ router.post("/refresh", refreshLimiter, (req, res) => {
       updatedAt: lastLoginAt,
     });
 
-    const nextRefresh = rotateRefreshToken({
-      currentTokenId: record.id,
+    const nextRefresh = rotateRefreshSession({
+      currentTokenId: lookup.record.id,
       user,
-      req,
-      rememberMe: inferRememberMeFromRefreshRecord(record),
+      rememberMe: inferRememberMeFromRefreshRecord(lookup.record),
+      meta: sessionMeta,
     });
     const nextRefreshMaxAge = Math.max(
       0,

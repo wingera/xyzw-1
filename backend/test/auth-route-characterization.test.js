@@ -50,6 +50,13 @@ const toCookieHeader = (setCookieValues = []) =>
     .filter(Boolean)
     .join("; ");
 
+const extractCookieValue = (setCookieValues = [], cookieName) => {
+  const cookie = findSetCookie(setCookieValues, cookieName);
+  const pair = String(cookie || "").split(";")[0] || "";
+  const prefix = `${cookieName}=`;
+  return pair.startsWith(prefix) ? pair.slice(prefix.length) : "";
+};
+
 const mergeCookieHeaders = (...headers) => {
   const pairs = new Map();
   for (const header of headers) {
@@ -86,6 +93,7 @@ const seedUser = ({
   mfaEnabled = false,
   mfaSecret = "",
   isAdmin = false,
+  trialExpiresAt = null,
 }) => {
   const ts = nowIso();
   const passwordMeta = createPassword(password);
@@ -98,10 +106,10 @@ const seedUser = ({
   run(
     `INSERT INTO users (
       id, username, email, password_salt, password_hash, token_version, is_admin,
-      mfa_enabled, mfa_totp_secret_enc, mfa_recovery_codes_hash, created_at, updated_at
+      mfa_enabled, mfa_totp_secret_enc, mfa_recovery_codes_hash, trial_expires_at, created_at, updated_at
     ) VALUES (
       $id, $username, $email, $salt, $hash, $tokenVersion, $isAdmin,
-      $mfaEnabled, $mfaTotpSecretEnc, $mfaRecoveryCodesHash, $createdAt, $updatedAt
+      $mfaEnabled, $mfaTotpSecretEnc, $mfaRecoveryCodesHash, $trialExpiresAt, $createdAt, $updatedAt
     )`,
     {
       $id: userId,
@@ -114,6 +122,7 @@ const seedUser = ({
       $mfaEnabled: mfaEnabled ? 1 : 0,
       $mfaTotpSecretEnc: mfaEnabled ? encryptMfaSecret(mfaSecret) : null,
       $mfaRecoveryCodesHash: mfaEnabled ? "[]" : null,
+      $trialExpiresAt: trialExpiresAt,
       $createdAt: ts,
       $updatedAt: ts,
     },
@@ -157,6 +166,23 @@ const fetchCsrfContext = async (baseUrl, cookieHeader = "") => {
   return {
     csrfToken,
     cookieHeader: mergeCookieHeaders(cookieHeader, toCookieHeader(response.headers.getSetCookie())),
+  };
+};
+
+const callRefresh = async ({ baseUrl, cookieHeader }) => {
+  const response = await fetch(`${baseUrl}/api/v1/auth/refresh`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie: cookieHeader,
+      "user-agent": "auth-route-characterization",
+    },
+    body: JSON.stringify({}),
+  });
+  return {
+    response,
+    payload: await response.json(),
+    cookies: response.headers.getSetCookie(),
   };
 };
 
@@ -267,6 +293,269 @@ test("POST /auth/refresh preserves missing and invalid refresh token failures", 
   assert.equal(invalidPayload?.message, "刷新令牌无效，请重新登录");
   assertClearedCookie(invalidResponse.headers.getSetCookie(), env.accessCookieName);
   assertClearedCookie(invalidResponse.headers.getSetCookie(), env.refreshCookieName);
+});
+
+test("POST /auth/refresh preserves successful rotation response and database state", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_refresh_success_${suffix}`,
+    username: `route_refresh_success_${suffix}`,
+    password: "RouteRefresh123!Aa",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    password: user.password,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+
+  const loginResult = await login({
+    baseUrl,
+    username: user.username,
+    password: user.password,
+    rememberMe: true,
+  });
+  assert.equal(loginResult.response.status, 200);
+  const initialRefreshToken = extractCookieValue(loginResult.cookies, env.refreshCookieName);
+  const initialTokenId = initialRefreshToken.split(".")[0] || "";
+  assert.ok(initialTokenId, "expected initial refresh token id");
+
+  const refreshResult = await callRefresh({
+    baseUrl,
+    cookieHeader: toCookieHeader(loginResult.cookies),
+  });
+
+  assert.equal(refreshResult.response.status, 200);
+  assert.equal(refreshResult.payload?.success, true);
+  assert.deepEqual(Object.keys(refreshResult.payload?.data || {}).sort(), env.accessTokenExposeInBody ? ["token"] : []);
+  assert.ok(findSetCookie(refreshResult.cookies, env.accessCookieName), "expected new access cookie");
+  const nextRefreshToken = extractCookieValue(refreshResult.cookies, env.refreshCookieName);
+  const nextTokenId = nextRefreshToken.split(".")[0] || "";
+  assert.ok(nextTokenId, "expected rotated refresh token id");
+  assert.notEqual(nextTokenId, initialTokenId);
+
+  const initialRow = query(
+    `SELECT revoked_at as revokedAt, replaced_by_id as replacedById, last_used_at as lastUsedAt
+     FROM refresh_tokens WHERE id = $id`,
+    { $id: initialTokenId },
+  )[0];
+  assert.ok(initialRow?.revokedAt, "expected old refresh token to be revoked");
+  assert.equal(initialRow?.replacedById, nextTokenId);
+  assert.ok(initialRow?.lastUsedAt, "expected old refresh token last_used_at to be written");
+
+  const nextRows = query(
+    `SELECT id FROM refresh_tokens WHERE id = $id AND user_id = $userId AND revoked_at IS NULL`,
+    { $id: nextTokenId, $userId: user.id },
+  );
+  assert.equal(nextRows.length, 1, "expected rotated refresh token to be active");
+});
+
+test("POST /auth/refresh preserves revoked refresh token failure", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_refresh_revoked_${suffix}`,
+    username: `route_refresh_revoked_${suffix}`,
+    password: "RouteRefreshRevoked123!Aa",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    password: user.password,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+  const loginResult = await login({
+    baseUrl,
+    username: user.username,
+    password: user.password,
+  });
+  const refreshToken = extractCookieValue(loginResult.cookies, env.refreshCookieName);
+  const tokenId = refreshToken.split(".")[0] || "";
+  run(
+    `UPDATE refresh_tokens SET revoked_at = $revokedAt WHERE id = $id`,
+    { $id: tokenId, $revokedAt: nowIso() },
+  );
+
+  const result = await callRefresh({
+    baseUrl,
+    cookieHeader: toCookieHeader(loginResult.cookies),
+  });
+
+  assert.equal(result.response.status, 401);
+  assert.equal(result.payload?.success, false);
+  assert.equal(result.payload?.message, "登录状态已失效，请重新登录");
+  assert.equal(result.payload?.error?.code, "AUTH_REFRESH_REVOKED");
+  assertClearedCookie(result.cookies, env.accessCookieName);
+  assertClearedCookie(result.cookies, env.refreshCookieName);
+});
+
+test("POST /auth/refresh preserves expired refresh token failure and revocation", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_refresh_expired_${suffix}`,
+    username: `route_refresh_expired_${suffix}`,
+    password: "RouteRefreshExpired123!Aa",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    password: user.password,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+  const loginResult = await login({
+    baseUrl,
+    username: user.username,
+    password: user.password,
+  });
+  const refreshToken = extractCookieValue(loginResult.cookies, env.refreshCookieName);
+  const tokenId = refreshToken.split(".")[0] || "";
+  run(
+    `UPDATE refresh_tokens SET expires_at = $expiresAt, revoked_at = NULL WHERE id = $id`,
+    {
+      $id: tokenId,
+      $expiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
+    },
+  );
+
+  const result = await callRefresh({
+    baseUrl,
+    cookieHeader: toCookieHeader(loginResult.cookies),
+  });
+
+  assert.equal(result.response.status, 401);
+  assert.equal(result.payload?.success, false);
+  assert.equal(result.payload?.message, "登录状态已过期，请重新登录");
+  assert.equal(result.payload?.error?.code, "AUTH_REFRESH_EXPIRED");
+  assertClearedCookie(result.cookies, env.accessCookieName);
+  assertClearedCookie(result.cookies, env.refreshCookieName);
+  const row = query(`SELECT revoked_at as revokedAt FROM refresh_tokens WHERE id = $id`, {
+    $id: tokenId,
+  })[0];
+  assert.ok(row?.revokedAt, "expected expired refresh token to be revoked");
+});
+
+test("POST /auth/refresh preserves tokenVersion mismatch failure and revocation", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_refresh_version_${suffix}`,
+    username: `route_refresh_version_${suffix}`,
+    password: "RouteRefreshVersion123!Aa",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    password: user.password,
+    tokenVersion: 0,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+  const loginResult = await login({
+    baseUrl,
+    username: user.username,
+    password: user.password,
+  });
+  const refreshToken = extractCookieValue(loginResult.cookies, env.refreshCookieName);
+  const tokenId = refreshToken.split(".")[0] || "";
+  run(
+    `UPDATE users SET token_version = 1, updated_at = $updatedAt WHERE id = $id`,
+    { $id: user.id, $updatedAt: nowIso() },
+  );
+
+  const result = await callRefresh({
+    baseUrl,
+    cookieHeader: toCookieHeader(loginResult.cookies),
+  });
+
+  assert.equal(result.response.status, 401);
+  assert.equal(result.payload?.success, false);
+  assert.equal(result.payload?.message, "登录状态已失效，请重新登录");
+  assert.equal(result.payload?.error?.code, "AUTH_REFRESH_REVOKED");
+  assertClearedCookie(result.cookies, env.accessCookieName);
+  assertClearedCookie(result.cookies, env.refreshCookieName);
+  const row = query(`SELECT revoked_at as revokedAt FROM refresh_tokens WHERE id = $id`, {
+    $id: tokenId,
+  })[0];
+  assert.ok(row?.revokedAt, "expected mismatched refresh token to be revoked");
+});
+
+test("POST /auth/refresh preserves trial expired failure without rotation", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_refresh_trial_${suffix}`,
+    username: `route_refresh_trial_${suffix}`,
+    password: "RouteRefreshTrial123!Aa",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    password: user.password,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+  const loginResult = await login({
+    baseUrl,
+    username: user.username,
+    password: user.password,
+  });
+  const refreshToken = extractCookieValue(loginResult.cookies, env.refreshCookieName);
+  const tokenId = refreshToken.split(".")[0] || "";
+  run(
+    `UPDATE users SET trial_expires_at = $trialExpiresAt, updated_at = $updatedAt WHERE id = $id`,
+    {
+      $id: user.id,
+      $trialExpiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      $updatedAt: nowIso(),
+    },
+  );
+
+  const result = await callRefresh({
+    baseUrl,
+    cookieHeader: toCookieHeader(loginResult.cookies),
+  });
+
+  assert.equal(result.response.status, 403);
+  assert.equal(result.payload?.success, false);
+  assert.equal(result.payload?.message, "账号试用已到期，请联系管理员");
+  assert.equal(result.payload?.error?.code, "AUTH_TRIAL_EXPIRED");
+  assertClearedCookie(result.cookies, env.accessCookieName);
+  assertClearedCookie(result.cookies, env.refreshCookieName);
+  const rows = query(
+    `SELECT id FROM refresh_tokens WHERE user_id = $userId AND id != $tokenId`,
+    { $userId: user.id, $tokenId: tokenId },
+  );
+  assert.equal(rows.length, 0, "trial-expired refresh should not rotate a new refresh token");
 });
 
 test("POST /auth/logout preserves cookie cleanup response", async (t) => {
