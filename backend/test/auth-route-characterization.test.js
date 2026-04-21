@@ -1243,6 +1243,18 @@ test("MFA QR session preserves pending, approve, and approved poll login behavio
   assert.equal(completed.payload?.data?.user?.id, user.id);
   assert.ok(findSetCookie(completed.cookies, env.accessCookieName), "expected access cookie");
   assert.ok(findSetCookie(completed.cookies, env.refreshCookieName), "expected refresh cookie");
+  assert.equal(getMfaQrSession(sessionId), null);
+
+  const replayed = await callMfaQrPoll({ baseUrl, sessionId });
+  assert.equal(replayed.response.status, 410);
+  assert.deepEqual(replayed.payload, {
+    success: false,
+    message: "二维码会话已失效，请刷新二维码后重试",
+    error: {
+      code: "AUTH_MFA_QR_SESSION_EXPIRED",
+      message: "二维码会话已失效，请刷新二维码后重试",
+    },
+  });
 });
 
 test("MFA QR approve preserves missing code, invalid session, invalid code, and expired session failures", async (t) => {
