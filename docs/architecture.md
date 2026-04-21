@@ -6,7 +6,7 @@
 - 生产环境主链路：`浏览器 -> 前端静态资源` + `浏览器 -> backend/ (/api/v1, /ws)`
 - `deploy/legacy/worker.js`：历史备用部署方案，不是日常开发必需路径
 - `wrangler.toml`：仅保留 Pages 构建配置
-- `server/`：历史 Flask 服务，与当前 Express 主线并存但不并行承担主通道
+- `server/`：历史 Flask 迁移排障参考，不进入生产构建、部署、网关 upstream 或主链路开发
 
 ## 2) 最小架构图（开发）
 
@@ -22,7 +22,7 @@
 
 - `src/`：前端页面、状态管理、API 调用入口（统一使用 `/api/v1` 与 `/ws`）
 - `backend/`：正式后端服务，提供 REST + WebSocket + 数据持久化 + BIN 文件管理
-- `server/`：旧 Flask 方案，仅兼容历史 Token URL/BIN 场景
+- `server/`：旧 Flask 方案，仅作迁移排障参考，不新增业务主代码，不接入生产链路
 - `deploy/legacy/worker.js`：Cloudflare Worker 归档入口，默认不启用
 
 ## 4) 代理与入口约束
