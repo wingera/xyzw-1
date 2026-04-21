@@ -214,6 +214,7 @@ import {
   APP_SIDER_WIDTH,
 } from "@/constants/ui";
 import {
+  ANDROID_APP_USER_ACTION,
   createSupportMenuOptions,
   createUserMenuOptions,
 } from "@/layout/appShellNavigation";
@@ -425,6 +426,9 @@ const handleUserAction = async (key) => {
   switch (key) {
     case "profile":
       router.push("/admin/profile");
+      break;
+    case ANDROID_APP_USER_ACTION:
+      router.push("/android-app");
       break;
     case "logout-account":
       await authStore.logout();

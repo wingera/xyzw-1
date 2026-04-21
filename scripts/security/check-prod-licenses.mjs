@@ -4,6 +4,7 @@ import { spawnSync } from "child_process";
 
 const rootDir = process.cwd();
 const allowPath = path.join(rootDir, "scripts/security/allowed-licenses.json");
+const exceptionPath = path.join(rootDir, "scripts/security/license-exceptions.json");
 
 if (!fs.existsSync(allowPath)) {
   console.error(`[security:licenses] missing allowlist file: ${allowPath}`);
@@ -11,6 +12,26 @@ if (!fs.existsSync(allowPath)) {
 }
 
 const allowedLicenses = new Set(JSON.parse(fs.readFileSync(allowPath, "utf8")));
+const licenseExceptions = new Map();
+
+if (fs.existsSync(exceptionPath)) {
+  const rawExceptions = JSON.parse(fs.readFileSync(exceptionPath, "utf8"));
+  if (!Array.isArray(rawExceptions)) {
+    console.error(`[security:licenses] exceptions file must be an array: ${exceptionPath}`);
+    process.exit(1);
+  }
+  for (const exception of rawExceptions) {
+    const dependency = String(exception?.dependency || "").trim();
+    const version = String(exception?.version || "").trim();
+    const license = String(exception?.license || "").trim();
+    const reason = String(exception?.reason || "").trim();
+    if (!dependency || !version || !license || !reason) {
+      console.error("[security:licenses] exception entries require dependency, version, license, and reason");
+      process.exit(1);
+    }
+    licenseExceptions.set(`${dependency}@${version}|${license}`, reason);
+  }
+}
 
 const runNpmLs = (cwd) => {
   const commandResult = spawnSync(
@@ -70,7 +91,8 @@ const checkTree = (tree, scopeName) => {
       });
     } else {
       const disallowed = parts.filter((item) => !allowedLicenses.has(item));
-      if (disallowed.length > 0) {
+      const exceptionReason = licenseExceptions.get(`${key}|${rawLicense}`);
+      if (disallowed.length > 0 && !exceptionReason) {
         violations.push({
           dependency: key,
           license: rawLicense,
