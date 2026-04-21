@@ -301,6 +301,75 @@ const callMfaResetByLinkWithHost = async ({ baseUrl, token, host }) => {
   });
 };
 
+const callMfaSetup = async ({ baseUrl, cookieHeader = "", password }) => {
+  const headers = {
+    "content-type": "application/json",
+    "user-agent": "auth-route-characterization",
+  };
+  if (cookieHeader) headers.cookie = cookieHeader;
+  const response = await fetch(`${baseUrl}/api/v1/auth/mfa/setup`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ password }),
+  });
+  return {
+    response,
+    payload: await response.json(),
+  };
+};
+
+const callMfaEnable = async ({
+  baseUrl,
+  cookieHeader,
+  password,
+  secret,
+  totpCode,
+}) => {
+  const response = await fetch(`${baseUrl}/api/v1/auth/mfa/enable`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "user-agent": "auth-route-characterization",
+      cookie: cookieHeader,
+    },
+    body: JSON.stringify({
+      password,
+      secret,
+      totpCode,
+    }),
+  });
+  return {
+    response,
+    payload: await response.json(),
+  };
+};
+
+const callMfaDisable = async ({
+  baseUrl,
+  cookieHeader,
+  password,
+  totpCode = "",
+  recoveryCode = "",
+}) => {
+  const response = await fetch(`${baseUrl}/api/v1/auth/mfa/disable`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "user-agent": "auth-route-characterization",
+      cookie: cookieHeader,
+    },
+    body: JSON.stringify({
+      password,
+      totpCode,
+      recoveryCode,
+    }),
+  });
+  return {
+    response,
+    payload: await response.json(),
+  };
+};
+
 test("POST /auth/login preserves success response shape and auth cookies", async (t) => {
   await initDatabase();
   const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -733,6 +802,251 @@ test("POST /auth/login preserves CSRF mismatch response under app middleware", a
     success: false,
     message: "CSRF 校验失败，请刷新页面后重试",
   });
+});
+
+test("MFA setup preserves auth requirement, password check, and response shape", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_mfa_setup_${suffix}`,
+    username: `route_mfa_setup_${suffix}`,
+    credential: "RouteMfaSetup123!Aa",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    credential: user.credential,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+
+  const missingAuth = await callMfaSetup({
+    baseUrl,
+    password: user.credential,
+  });
+  assert.equal(missingAuth.response.status, 401);
+  assert.deepEqual(missingAuth.payload, {
+    success: false,
+    message: "未登录或登录信息缺失",
+    error: {
+      code: "AUTH_MISSING_TOKEN",
+      message: "未登录或登录信息缺失",
+    },
+  });
+
+  const loginResult = await login({
+    baseUrl,
+    username: user.username,
+    credential: user.credential,
+  });
+  const cookieHeader = toCookieHeader(loginResult.cookies);
+
+  const wrongPassword = await callMfaSetup({
+    baseUrl,
+    cookieHeader,
+    password: "WrongMfaSetup123!Aa",
+  });
+  assert.equal(wrongPassword.response.status, 400);
+  assert.deepEqual(wrongPassword.payload, {
+    success: false,
+    message: "当前密码错误",
+  });
+
+  const setupResult = await callMfaSetup({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+  });
+  assert.equal(setupResult.response.status, 200);
+  assert.equal(setupResult.payload?.success, true);
+  assert.equal(typeof setupResult.payload?.data?.secret, "string");
+  assert.match(setupResult.payload?.data?.otpauthUrl || "", /^otpauth:\/\/totp\//);
+  assert.equal(setupResult.payload?.message, undefined);
+
+  const stored = query(
+    `SELECT mfa_enabled as mfaEnabled, mfa_totp_secret_enc as mfaTotpSecretEnc
+     FROM users WHERE id = $id`,
+    { $id: user.id },
+  )[0];
+  assert.equal(Number(stored.mfaEnabled), 0);
+  assert.equal(stored.mfaTotpSecretEnc, null);
+});
+
+test("MFA enable preserves TOTP validation, stored MFA settings, and recovery code response", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_mfa_enable_${suffix}`,
+    username: `route_mfa_enable_${suffix}`,
+    credential: "RouteMfaEnable123!Aa",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    credential: user.credential,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+  const loginResult = await login({
+    baseUrl,
+    username: user.username,
+    credential: user.credential,
+  });
+  const cookieHeader = toCookieHeader(loginResult.cookies);
+  const setupResult = await callMfaSetup({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+  });
+  const secret = setupResult.payload.data.secret;
+
+  const invalidCode = await callMfaEnable({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+    secret,
+    totpCode: "000000",
+  });
+  assert.equal(invalidCode.response.status, 400);
+  assert.deepEqual(invalidCode.payload, {
+    success: false,
+    message: "验证码无效，请检查时间同步后重试",
+  });
+
+  const enabled = await callMfaEnable({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+    secret,
+    totpCode: generateTotpCode({ secret }),
+  });
+  assert.equal(enabled.response.status, 200);
+  assert.equal(enabled.payload?.success, true);
+  assert.equal(enabled.payload?.message, "双重验证已启用");
+  assert.equal(enabled.payload?.data?.recoveryCodes?.length, 8);
+
+  const stored = query(
+    `SELECT mfa_enabled as mfaEnabled,
+            mfa_totp_secret_enc as mfaTotpSecretEnc,
+            mfa_recovery_codes_hash as mfaRecoveryCodesHash
+     FROM users WHERE id = $id`,
+    { $id: user.id },
+  )[0];
+  assert.equal(Number(stored.mfaEnabled), 1);
+  assert.ok(String(stored.mfaTotpSecretEnc || "").length > 0);
+  const recoveryCodeHashes = JSON.parse(stored.mfaRecoveryCodesHash || "[]");
+  assert.equal(recoveryCodeHashes.length, enabled.payload.data.recoveryCodes.length);
+
+  const repeated = await callMfaEnable({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+    secret,
+    totpCode: generateTotpCode({ secret }),
+  });
+  assert.equal(repeated.response.status, 200);
+  assert.equal(repeated.payload?.message, "双重验证已启用");
+});
+
+test("MFA disable preserves password and code checks before disabling MFA", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_mfa_disable_${suffix}`,
+    username: `route_mfa_disable_${suffix}`,
+    credential: "RouteMfaDisable123!Aa",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    credential: user.credential,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+  const loginResult = await login({
+    baseUrl,
+    username: user.username,
+    credential: user.credential,
+  });
+  const cookieHeader = toCookieHeader(loginResult.cookies);
+  const setupResult = await callMfaSetup({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+  });
+  const secret = setupResult.payload.data.secret;
+  const enabled = await callMfaEnable({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+    secret,
+    totpCode: generateTotpCode({ secret }),
+  });
+  assert.equal(enabled.response.status, 200);
+
+  const wrongPassword = await callMfaDisable({
+    baseUrl,
+    cookieHeader,
+    password: "WrongMfaDisable123!Aa",
+    totpCode: generateTotpCode({ secret }),
+  });
+  assert.equal(wrongPassword.response.status, 400);
+  assert.deepEqual(wrongPassword.payload, {
+    success: false,
+    message: "当前密码错误",
+  });
+
+  const invalidCode = await callMfaDisable({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+    totpCode: "000000",
+  });
+  assert.equal(invalidCode.response.status, 400);
+  assert.deepEqual(invalidCode.payload, {
+    success: false,
+    message: "验证码或恢复码无效",
+  });
+
+  const disabled = await callMfaDisable({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+    totpCode: generateTotpCode({ secret }),
+  });
+  assert.equal(disabled.response.status, 200);
+  assert.deepEqual(disabled.payload, {
+    success: true,
+    message: "双重验证已关闭",
+  });
+
+  const stored = query(
+    `SELECT mfa_enabled as mfaEnabled,
+            mfa_totp_secret_enc as mfaTotpSecretEnc,
+            mfa_recovery_codes_hash as mfaRecoveryCodesHash,
+            token_version as tokenVersion
+     FROM users WHERE id = $id`,
+    { $id: user.id },
+  )[0];
+  assert.equal(Number(stored.mfaEnabled), 0);
+  assert.equal(stored.mfaTotpSecretEnc, null);
+  assert.equal(stored.mfaRecoveryCodesHash, null);
+  assert.equal(Number(stored.tokenVersion), 0);
 });
 
 test("MFA login preserves challenge response before session issuance and verified login response after TOTP", async (t) => {
