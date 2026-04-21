@@ -4,8 +4,6 @@ import { z } from "zod";
 import {
   createPassword,
   sha256Hex,
-  signJwt,
-  verifyJwt,
   verifyPassword,
   verifyPasswordDetails,
 } from "../lib/crypto.js";
@@ -22,19 +20,12 @@ import { refreshTokenRepository } from "../repositories/refreshTokenRepository.j
 import { userRepository } from "../repositories/userRepository.js";
 import { transaction } from "../db/client.js";
 import { env } from "../config/env.js";
-import { parseCookies } from "../lib/cookies.js";
 import {
   clearReferralCookie,
   readReferralCookieFromRequest,
 } from "../lib/referralCookie.js";
 import { clearCsrfCookies } from "../middleware/csrf.js";
-import { resolveCookieSecure } from "../lib/cookieSecurity.js";
-import { normalizeHttpOrigin } from "../lib/origin.js";
-import {
-  ACCESS_SCOPE_FULL,
-  ACCESS_SCOPE_TASK_CONTROL_ONLY,
-  normalizeAccessScope,
-} from "../constants/accessScope.js";
+import { ACCESS_SCOPE_TASK_CONTROL_ONLY } from "../constants/accessScope.js";
 import { disconnectUserSockets } from "../services/wsHub.js";
 import { redactUrl } from "../lib/logRedactor.js";
 import {
@@ -68,6 +59,44 @@ import {
   fetchWechatUserProfile,
   isWechatOpenConfigured,
 } from "../services/wechatOpenAuthService.js";
+import {
+  buildAccessToken,
+  inferRememberMeFromRefreshRecord,
+} from "../modules/auth/tokens.js";
+import {
+  clearAccessCookie,
+  clearRefreshCookie,
+  readRefreshTokenFromRequest,
+  refreshCookieOptions,
+  setAccessCookie,
+} from "../modules/auth/cookies.js";
+import {
+  buildAuthUserPayload,
+  getLoginBlockedError,
+  issueLoginSession,
+  reqMeta,
+  rotateRefreshToken,
+} from "../modules/auth/session.js";
+import {
+  cleanupExpiredMfaQrSessions,
+  createMfaQrSession,
+  deleteMfaQrSession,
+  getMfaChallengeUser,
+  getMfaQrSession,
+  issueMfaChallengeToken,
+  issueMfaResetLinkToken,
+  MFA_RESET_LINK_TTL_SECONDS,
+  parseMfaResetLinkToken,
+  saveMfaQrSession,
+  verifyMfaCredentials,
+} from "../modules/auth/mfaChallenge.js";
+import {
+  isLocalMfaResetRequest,
+  logPasswordResetMaskedReason,
+  maskIdentity,
+  PASSWORD_RESET_GENERIC_MESSAGE,
+} from "../modules/auth/passwordReset.js";
+import { buildCsrfResponseData } from "../modules/auth/csrf.js";
 
 const router = Router();
 router.get("/temporary-invites", (_req, res) => {
@@ -124,95 +153,18 @@ const refreshLimiter = createRateLimiter({
 });
 const INVITE_AUTO_DISABLE_HOURS = 48;
 const TEMP_ACCOUNT_DAYS = 7;
-const PASSWORD_RESET_GENERIC_MESSAGE = "如果信息正确，密码已重置，请使用新密码登录";
-const ACCESS_TOKEN_TTL_SECONDS = env.accessTokenTtlSeconds;
-const REFRESH_TOKEN_SHORT_TTL_MS = env.refreshTokenShortTtlDays * 24 * 60 * 60 * 1000;
-const REFRESH_TOKEN_LONG_TTL_MS = env.refreshTokenLongTtlDays * 24 * 60 * 60 * 1000;
-const REFRESH_TOKEN_BYTES = 48;
-const MFA_CHALLENGE_TTL_SECONDS = 5 * 60;
-const MFA_CHALLENGE_PURPOSE = "auth-mfa-challenge";
-const MFA_RESET_LINK_TTL_SECONDS = 60 * 60;
-const MFA_RESET_LINK_PURPOSE = "auth-mfa-reset-link";
 const wechatLoginStartBodySchema = z.object({
   rememberMe: z.boolean().optional().default(false),
 }).strict();
-const MFA_QR_SESSION_TTL_MS = MFA_CHALLENGE_TTL_SECONDS * 1000;
-const MAX_MFA_QR_SESSION_COUNT = 500;
-const mfaQrSessionStore = new Map();
 const WECHAT_AUTH_FLOW_TTL_MS = 5 * 60 * 1000;
 const MAX_WECHAT_AUTH_FLOW_COUNT = 500;
 const WECHAT_AUTH_CALLBACK_SOURCE = "xyzw-wechat-auth";
 const wechatAuthFlowStore = new Map();
 
-const isLocalMfaResetRequest = (req) => {
-  const origin = normalizeHttpOrigin(String(req.get("origin") || "").trim());
-  const refererRaw = String(req.get("referer") || "").trim();
-  let referer = null;
-  try {
-    referer = refererRaw ? normalizeHttpOrigin(new URL(refererRaw).origin) : null;
-  } catch {
-    referer = null;
-  }
-  const host = String(req.hostname || "").trim().toLowerCase();
-  return (
-    host === "127.0.0.1"
-    || origin?.hostname === "127.0.0.1"
-    || referer?.hostname === "127.0.0.1"
-  );
-};
-
-const logPasswordResetMaskedReason = (identity, reason) => {
-  // eslint-disable-next-line no-console
-  console.warn(`[auth] password reset masked reason: ${reason} (identity=${identity || "unknown"})`);
-};
-
-const reqMeta = (req) => ({
-  ip: req.ip || null,
-  userAgent: req.headers["user-agent"] || null,
-});
-
-const maskIdentity = (identity) => {
-  const text = String(identity || "").trim();
-  if (!text) {
-    return "";
-  }
-  if (text.length <= 2) {
-    return "*".repeat(text.length);
-  }
-  return `${text.slice(0, 2)}***`;
-};
-
-const readRefreshTokenFromRequest = (req) => {
-  const cookies = parseCookies(req.headers?.cookie || "");
-  return String(cookies[env.refreshCookieName] || "").trim();
-};
-
-const makeRefreshTokenValue = (tokenId) =>
-  `${tokenId}.${crypto.randomBytes(REFRESH_TOKEN_BYTES).toString("base64url")}`;
-
-const buildAccessToken = (user) =>
-  signJwt(
-    {
-      sub: user.id,
-      username: user.username,
-      ver: Number(user.tokenVersion ?? 0),
-    },
-    ACCESS_TOKEN_TTL_SECONDS,
-  );
-
 const createAccountDisplayId = () => {
   const raw = crypto.randomBytes(8).toString("hex").toUpperCase();
   return raw.match(/.{1,4}/g)?.join("-") || raw;
 };
-
-const refreshCookieOptions = (req, maxAgeMs) => ({
-  httpOnly: true,
-  secure: resolveCookieSecure(req, env.refreshCookieSecure),
-  sameSite: env.refreshCookieSameSite,
-  path: env.refreshCookiePath,
-  ...(env.refreshCookieDomain ? { domain: env.refreshCookieDomain } : {}),
-  maxAge: maxAgeMs,
-});
 
 const referralRegisterError = (req, res, code, message) => {
   clearReferralCookie(req, res);
@@ -221,358 +173,6 @@ const referralRegisterError = (req, res, code, message) => {
     code,
     message,
   });
-};
-
-const accessCookieOptions = (req, maxAgeMs) => ({
-  httpOnly: true,
-  secure: resolveCookieSecure(req, env.accessCookieSecure),
-  sameSite: env.accessCookieSameSite,
-  path: env.accessCookiePath,
-  ...(env.accessCookieDomain ? { domain: env.accessCookieDomain } : {}),
-  maxAge: maxAgeMs,
-});
-
-const clearRefreshCookie = (req, res) => {
-  res.clearCookie(env.refreshCookieName, refreshCookieOptions(req, 0));
-  // Backward compatibility: also clear root-path cookie with same name.
-  res.clearCookie(env.refreshCookieName, {
-    ...refreshCookieOptions(req, 0),
-    path: "/",
-  });
-};
-
-const setAccessCookie = (req, res, accessToken) => {
-  res.cookie(
-    env.accessCookieName,
-    accessToken,
-    accessCookieOptions(req, Math.max(0, ACCESS_TOKEN_TTL_SECONDS * 1000)),
-  );
-};
-
-const clearAccessCookie = (req, res) => {
-  res.clearCookie(env.accessCookieName, accessCookieOptions(req, 0));
-  // Backward compatibility: also clear root-path cookie with same name.
-  if (env.accessCookiePath !== "/") {
-    res.clearCookie(env.accessCookieName, {
-      ...accessCookieOptions(req, 0),
-      path: "/",
-    });
-  }
-};
-
-const resolveRefreshTokenTtlMs = (rememberMe) =>
-  rememberMe
-    ? REFRESH_TOKEN_LONG_TTL_MS
-    : REFRESH_TOKEN_SHORT_TTL_MS;
-
-const inferRememberMeFromRefreshRecord = (record) => {
-  const createdTs = new Date(record?.createdAt || "").getTime();
-  const expiresTs = new Date(record?.expiresAt || "").getTime();
-  if (!Number.isFinite(createdTs) || !Number.isFinite(expiresTs) || expiresTs <= createdTs) {
-    return true;
-  }
-  const ttlMs = expiresTs - createdTs;
-  const threshold = (REFRESH_TOKEN_SHORT_TTL_MS + REFRESH_TOKEN_LONG_TTL_MS) / 2;
-  return ttlMs >= threshold;
-};
-
-const issueRefreshToken = ({ user, req, rememberMe = false }) => {
-  const tokenId = secureId("rft");
-  const refreshToken = makeRefreshTokenValue(tokenId);
-  const ttlMs = resolveRefreshTokenTtlMs(rememberMe);
-  const now = new Date();
-  const createdAt = now.toISOString();
-  const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
-  refreshTokenRepository.create({
-    id: tokenId,
-    userId: user.id,
-    tokenHash: sha256Hex(refreshToken),
-    tokenVersion: Number(user.tokenVersion ?? 0),
-    expiresAt,
-    createdAt,
-    createdIp: req.ip || null,
-    createdUserAgent: req.headers["user-agent"] || null,
-  });
-
-  return {
-    refreshToken,
-    expiresAt,
-    tokenId,
-    ttlMs,
-  };
-};
-
-const rotateRefreshToken = ({ currentTokenId, user, req, rememberMe = false }) => {
-  const now = nowIso();
-  const next = issueRefreshToken({ user, req, rememberMe });
-  refreshTokenRepository.revokeById({
-    id: currentTokenId,
-    revokedAt: now,
-    replacedById: next.tokenId,
-    lastUsedAt: now,
-    lastUsedIp: req.ip || null,
-    lastUsedUserAgent: req.headers["user-agent"] || null,
-  });
-  return next;
-};
-
-const buildAuthUserPayload = (user, { lastLoginAt = null } = {}) => ({
-  id: user.id,
-  username: user.username,
-  email: user.email,
-  nickname: user.nickname || "",
-  phone: user.phone || "",
-  trialExpiresAt: user.trialExpiresAt || null,
-  accessScope: normalizeAccessScope(user.accessScope),
-  isTaskControlOnly:
-    normalizeAccessScope(user.accessScope) === ACCESS_SCOPE_TASK_CONTROL_ONLY,
-  hasGameFeatureAccess:
-    normalizeAccessScope(user.accessScope) === ACCESS_SCOPE_FULL,
-  tokenBindLimit: Math.max(1, Math.min(999, Number(user.tokenBindLimit) || 999)),
-  mfaEnabled: !!user.mfaEnabled,
-  lastLoginAt: lastLoginAt || user.lastLoginAt || null,
-  wechatBound: Boolean(user.wechatBound),
-  wechatBoundAt: user.wechatBoundAt || null,
-  isAdmin: user.isAdmin,
-  createdAt: user.createdAt,
-  avatar: "/icons/xiaoyugan.png",
-});
-
-const getLoginBlockedError = (user) => {
-  if (
-    user?.trialExpiresAt
-    && Number.isFinite(new Date(user.trialExpiresAt).getTime())
-    && new Date(user.trialExpiresAt).getTime() < Date.now()
-  ) {
-    return {
-      status: 403,
-      code: "AUTH_TRIAL_EXPIRED",
-      message: "账号试用已到期，请联系管理员",
-      reason: "trial_expired",
-    };
-  }
-  return null;
-};
-
-const issueLoginSession = ({
-  req,
-  res,
-  user,
-  rememberMe = false,
-  loginMethod = "password",
-}) => {
-  const safeLoginMethod = String(loginMethod || "password").trim() || "password";
-  const lastLoginAt = nowIso();
-  userRepository.updateLastLogin({
-    id: user.id,
-    lastLoginAt,
-    updatedAt: lastLoginAt,
-  });
-  if (safeLoginMethod.startsWith("wechat")) {
-    userRepository.updateWechatLastLogin({
-      id: user.id,
-      wechatLastLoginAt: lastLoginAt,
-      updatedAt: lastLoginAt,
-    });
-  }
-
-  const token = buildAccessToken(user);
-  setAccessCookie(req, res, token);
-  const refresh = issueRefreshToken({ user, req, rememberMe });
-  const refreshMaxAge = Math.max(
-    0,
-    new Date(refresh.expiresAt).getTime() - Date.now(),
-  );
-  res.cookie(
-    env.refreshCookieName,
-    refresh.refreshToken,
-    refreshCookieOptions(req, refreshMaxAge),
-  );
-
-  const loginDetail = {
-    loginMethod: safeLoginMethod,
-    isAdmin: Boolean(user.isAdmin),
-    rememberMe: Boolean(rememberMe),
-    refreshTtlDays: Math.round(refresh.ttlMs / (24 * 60 * 60 * 1000)),
-  };
-  recordSecurityEvent({
-    userId: user.id,
-    eventType: "login_success",
-    detail: loginDetail,
-    ...reqMeta(req),
-  });
-  if (safeLoginMethod.startsWith("wechat")) {
-    recordSecurityEvent({
-      userId: user.id,
-      eventType: "wechat_login_success",
-      detail: loginDetail,
-      ...reqMeta(req),
-    });
-  }
-
-  return {
-    token,
-    lastLoginAt,
-    refresh,
-  };
-};
-
-const issueMfaChallengeToken = (
-  user,
-  {
-    rememberMe = false,
-    loginMethod = "password+mfa",
-  } = {},
-) =>
-  signJwt(
-    {
-      sub: user.id,
-      username: user.username,
-      ver: Number(user.tokenVersion ?? 0),
-      purpose: MFA_CHALLENGE_PURPOSE,
-      rememberMe: Boolean(rememberMe),
-      loginMethod: String(loginMethod || "password+mfa").trim() || "password+mfa",
-    },
-    MFA_CHALLENGE_TTL_SECONDS,
-  );
-
-const issueMfaResetLinkToken = (user, { requestedBy = "" } = {}) =>
-  signJwt(
-    {
-      sub: user.id,
-      username: user.username,
-      ver: Number(user.tokenVersion ?? 0),
-      purpose: MFA_RESET_LINK_PURPOSE,
-      requestedBy: String(requestedBy || "").trim() || null,
-      mfaEnabled: Boolean(user.mfaEnabled),
-    },
-    MFA_RESET_LINK_TTL_SECONDS,
-  );
-
-const parseMfaChallengeToken = (challengeToken) => {
-  const payload = verifyJwt(challengeToken);
-  if (String(payload?.purpose || "") !== MFA_CHALLENGE_PURPOSE) {
-    throw new Error("invalid_mfa_challenge");
-  }
-  return payload;
-};
-
-const parseMfaResetLinkToken = (token) => {
-  const payload = verifyJwt(token);
-  if (String(payload?.purpose || "") !== MFA_RESET_LINK_PURPOSE) {
-    throw new Error("invalid_mfa_reset_link");
-  }
-  return payload;
-};
-
-const getMfaChallengeUser = (challengeToken) => {
-  let payload;
-  try {
-    payload = parseMfaChallengeToken(challengeToken);
-  } catch {
-    return {
-      ok: false,
-      status: 401,
-      code: "AUTH_MFA_CHALLENGE_INVALID",
-      message: "MFA 挑战无效或已过期",
-    };
-  }
-
-  const user = userRepository.findById(String(payload?.sub || ""));
-  if (!user) {
-    return {
-      ok: false,
-      status: 401,
-      code: "AUTH_USER_NOT_FOUND",
-      message: "用户不存在或已失效",
-    };
-  }
-  if (!user.mfaEnabled || !user.mfaTotpSecretEnc) {
-    return {
-      ok: false,
-      status: 403,
-      code: "AUTH_MFA_SETUP_REQUIRED",
-      message: "账号尚未启用双重验证",
-    };
-  }
-  if (Number(payload?.ver) !== Number(user.tokenVersion ?? 0)) {
-    return {
-      ok: false,
-      status: 401,
-      code: "AUTH_MFA_CHALLENGE_INVALID",
-      message: "MFA 挑战无效或已过期",
-    };
-  }
-  if (String(payload?.username || "") !== String(user.username || "")) {
-    return {
-      ok: false,
-      status: 401,
-      code: "AUTH_MFA_CHALLENGE_INVALID",
-      message: "MFA 挑战无效或已过期",
-    };
-  }
-
-  const secret = decryptMfaSecret(user.mfaTotpSecretEnc);
-  if (!secret) {
-    return {
-      ok: false,
-      status: 403,
-      code: "AUTH_MFA_SETUP_REQUIRED",
-      message: "账号尚未启用双重验证",
-    };
-  }
-
-  return {
-    ok: true,
-    user,
-    payload,
-    secret,
-  };
-};
-
-const verifyMfaCredentials = ({ user, secret, totpCode, recoveryCode }) => {
-  if (totpCode) {
-    return { ok: verifyTotpCode({ secret, code: totpCode }) };
-  }
-
-  if (!recoveryCode) {
-    return { ok: false };
-  }
-
-  const recoveryResult = verifyAndConsumeRecoveryCode({
-    inputCode: recoveryCode,
-    recoveryCodeHashesJson: user.mfaRecoveryCodesHash || "[]",
-  });
-
-  if (!recoveryResult.ok) {
-    return { ok: false };
-  }
-
-  userRepository.updateMfaRecoveryCodesHash({
-    id: user.id,
-    mfaRecoveryCodesHash: recoveryResult.nextRecoveryCodeHashesJson,
-    updatedAt: nowIso(),
-  });
-  return { ok: true };
-};
-
-const cleanupExpiredMfaQrSessions = () => {
-  const now = Date.now();
-  for (const [sessionId, session] of mfaQrSessionStore.entries()) {
-    if (!session || Number(session.expiresAtMs) <= now || session.consumedAtMs) {
-      mfaQrSessionStore.delete(sessionId);
-    }
-  }
-  if (mfaQrSessionStore.size <= MAX_MFA_QR_SESSION_COUNT) {
-    return;
-  }
-  const sessions = Array.from(mfaQrSessionStore.entries()).sort(
-    (a, b) => Number(a?.[1]?.createdAtMs || 0) - Number(b?.[1]?.createdAtMs || 0),
-  );
-  const removeCount = Math.max(0, sessions.length - MAX_MFA_QR_SESSION_COUNT);
-  for (let i = 0; i < removeCount; i += 1) {
-    mfaQrSessionStore.delete(String(sessions[i]?.[0] || ""));
-  }
 };
 
 const cleanupExpiredWechatAuthFlows = () => {
@@ -1413,23 +1013,16 @@ router.post(
       );
     }
 
-    const now = Date.now();
-    const sessionId = secureId("mfaqr");
-    mfaQrSessionStore.set(sessionId, {
-      id: sessionId,
+    const session = createMfaQrSession({
       userId: challengeCheck.user.id,
       mfaChallengeToken,
-      createdAtMs: now,
-      expiresAtMs: now + MFA_QR_SESSION_TTL_MS,
-      approvedAtMs: 0,
-      consumedAtMs: 0,
     });
 
     return res.json({
       success: true,
       data: {
-        sessionId,
-        expiresAt: new Date(now + MFA_QR_SESSION_TTL_MS).toISOString(),
+        sessionId: session.id,
+        expiresAt: new Date(session.expiresAtMs).toISOString(),
       },
     });
   },
@@ -1448,22 +1041,22 @@ router.post(
       return res.status(400).json({ success: false, message: "请输入验证码或恢复码" });
     }
 
-    const session = mfaQrSessionStore.get(sessionId);
+    const session = getMfaQrSession(sessionId);
     if (!session) {
       return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已失效，请刷新二维码后重试");
     }
     if (session.consumedAtMs) {
-      mfaQrSessionStore.delete(sessionId);
+      deleteMfaQrSession(sessionId);
       return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已失效，请刷新二维码后重试");
     }
     if (Date.now() > Number(session.expiresAtMs || 0)) {
-      mfaQrSessionStore.delete(sessionId);
+      deleteMfaQrSession(sessionId);
       return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已过期，请刷新二维码后重试");
     }
 
     const challengeCheck = getMfaChallengeUser(session.mfaChallengeToken);
     if (!challengeCheck.ok) {
-      mfaQrSessionStore.delete(sessionId);
+      deleteMfaQrSession(sessionId);
       return errorResponse(
         res,
         challengeCheck.status,
@@ -1490,7 +1083,7 @@ router.post(
     }
 
     session.approvedAtMs = Date.now();
-    mfaQrSessionStore.set(sessionId, session);
+    saveMfaQrSession(session);
     return res.json({ success: true, message: "扫码验证通过，请返回登录页面" });
   },
 );
@@ -1502,16 +1095,16 @@ router.post(
   (req, res) => {
     cleanupExpiredMfaQrSessions();
     const sessionId = String(req.body?.sessionId || "").trim();
-    const session = mfaQrSessionStore.get(sessionId);
+    const session = getMfaQrSession(sessionId);
     if (!session) {
       return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已失效，请刷新二维码后重试");
     }
     if (session.consumedAtMs) {
-      mfaQrSessionStore.delete(sessionId);
+      deleteMfaQrSession(sessionId);
       return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已失效，请刷新二维码后重试");
     }
     if (Date.now() > Number(session.expiresAtMs || 0)) {
-      mfaQrSessionStore.delete(sessionId);
+      deleteMfaQrSession(sessionId);
       return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已过期，请刷新二维码后重试");
     }
     if (!session.approvedAtMs) {
@@ -1525,7 +1118,7 @@ router.post(
 
     const challengeCheck = getMfaChallengeUser(session.mfaChallengeToken);
     if (!challengeCheck.ok) {
-      mfaQrSessionStore.delete(sessionId);
+      deleteMfaQrSession(sessionId);
       return errorResponse(
         res,
         challengeCheck.status,
@@ -1535,8 +1128,8 @@ router.post(
     }
 
     session.consumedAtMs = Date.now();
-    mfaQrSessionStore.set(sessionId, session);
-    mfaQrSessionStore.delete(sessionId);
+    saveMfaQrSession(session);
+    deleteMfaQrSession(sessionId);
     return finalizeLogin({
       req,
       res,
@@ -1978,11 +1571,7 @@ router.get("/me", authRequired, (req, res) => {
 router.get("/csrf", (req, res) => {
   return res.json({
     success: true,
-    data: {
-      headerName: env.csrfHeaderName,
-      token: req.csrfToken || null,
-      hasRefreshTokenCookie: Boolean(readRefreshTokenFromRequest(req)),
-    },
+    data: buildCsrfResponseData(req),
   });
 });
 
