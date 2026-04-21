@@ -13,7 +13,12 @@ import authRoutes from "../src/routes/auth.js";
 import { userRepository } from "../src/repositories/userRepository.js";
 import { encryptMfaSecret, generateTotpCode } from "../src/services/mfaService.js";
 import { PASSWORD_RESET_GENERIC_MESSAGE } from "../src/modules/auth/passwordReset.js";
-import { MFA_RESET_LINK_PURPOSE } from "../src/modules/auth/mfaChallenge.js";
+import {
+  deleteMfaQrSession,
+  getMfaQrSession,
+  MFA_RESET_LINK_PURPOSE,
+  saveMfaQrSession,
+} from "../src/modules/auth/mfaChallenge.js";
 
 const makeBaseUrl = (server) => {
   const address = server.address();
@@ -367,6 +372,61 @@ const callMfaDisable = async ({
   return {
     response,
     payload: await response.json(),
+  };
+};
+
+const callMfaQrSession = async ({ baseUrl, mfaChallengeToken }) => {
+  const response = await fetch(`${baseUrl}/api/v1/auth/mfa/qr/session`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "user-agent": "auth-route-characterization",
+    },
+    body: JSON.stringify({ mfaChallengeToken }),
+  });
+  return {
+    response,
+    payload: await response.json(),
+  };
+};
+
+const callMfaQrApprove = async ({
+  baseUrl,
+  sessionId,
+  totpCode = "",
+  recoveryCode = "",
+}) => {
+  const response = await fetch(`${baseUrl}/api/v1/auth/mfa/qr/approve`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "user-agent": "auth-route-characterization",
+    },
+    body: JSON.stringify({
+      sessionId,
+      totpCode,
+      recoveryCode,
+    }),
+  });
+  return {
+    response,
+    payload: await response.json(),
+  };
+};
+
+const callMfaQrPoll = async ({ baseUrl, sessionId }) => {
+  const response = await fetch(`${baseUrl}/api/v1/auth/mfa/qr/poll`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "user-agent": "auth-route-characterization",
+    },
+    body: JSON.stringify({ sessionId }),
+  });
+  return {
+    response,
+    payload: await response.json(),
+    cookies: response.headers.getSetCookie(),
   };
 };
 
@@ -1107,6 +1167,259 @@ test("MFA login preserves challenge response before session issuance and verifie
   const verifiedCookies = verifiedResponse.headers.getSetCookie();
   assert.ok(findSetCookie(verifiedCookies, env.accessCookieName), "expected access cookie");
   assert.ok(findSetCookie(verifiedCookies, env.refreshCookieName), "expected refresh cookie");
+});
+
+test("MFA QR session preserves pending, approve, and approved poll login behavior", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_mfa_qr_${suffix}`,
+    username: `route_mfa_qr_${suffix}`,
+    password: "RouteMfaQr123!Aa",
+    secret: "JBSWY3DPEHPK3PXP",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    password: user.password,
+    mfaEnabled: true,
+    mfaSecret: user.secret,
+  });
+
+  const server = await createAuthServer();
+  const sessionIds = new Set();
+  t.after(async () => {
+    for (const sessionId of sessionIds) {
+      deleteMfaQrSession(sessionId);
+    }
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+
+  const challenged = await login({
+    baseUrl,
+    username: user.username,
+    password: user.password,
+    rememberMe: true,
+  });
+  assert.equal(challenged.response.status, 200);
+
+  const qrSession = await callMfaQrSession({
+    baseUrl,
+    mfaChallengeToken: challenged.payload.data.mfaChallengeToken,
+  });
+  assert.equal(qrSession.response.status, 200);
+  assert.equal(qrSession.payload?.success, true);
+  assert.equal(typeof qrSession.payload?.data?.sessionId, "string");
+  assert.equal(typeof qrSession.payload?.data?.expiresAt, "string");
+  const sessionId = qrSession.payload.data.sessionId;
+  sessionIds.add(sessionId);
+
+  const pending = await callMfaQrPoll({ baseUrl, sessionId });
+  assert.equal(pending.response.status, 200);
+  assert.deepEqual(pending.payload, {
+    success: true,
+    data: {
+      status: "pending",
+    },
+  });
+
+  const approved = await callMfaQrApprove({
+    baseUrl,
+    sessionId,
+    totpCode: generateTotpCode({ secret: user.secret }),
+  });
+  assert.equal(approved.response.status, 200);
+  assert.deepEqual(approved.payload, {
+    success: true,
+    message: "扫码验证通过，请返回登录页面",
+  });
+
+  const completed = await callMfaQrPoll({ baseUrl, sessionId });
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.payload?.success, true);
+  assert.equal(completed.payload?.message, "登录成功");
+  assert.equal(completed.payload?.data?.user?.id, user.id);
+  assert.ok(findSetCookie(completed.cookies, env.accessCookieName), "expected access cookie");
+  assert.ok(findSetCookie(completed.cookies, env.refreshCookieName), "expected refresh cookie");
+});
+
+test("MFA QR approve preserves missing code, invalid session, invalid code, and expired session failures", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_mfa_qr_approve_${suffix}`,
+    username: `route_mfa_qr_approve_${suffix}`,
+    password: "RouteMfaQrApprove123!Aa",
+    secret: "JBSWY3DPEHPK3PXP",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    password: user.password,
+    mfaEnabled: true,
+    mfaSecret: user.secret,
+  });
+
+  const server = await createAuthServer();
+  const sessionIds = new Set();
+  t.after(async () => {
+    for (const sessionId of sessionIds) {
+      deleteMfaQrSession(sessionId);
+    }
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+  const challenged = await login({
+    baseUrl,
+    username: user.username,
+    password: user.password,
+  });
+
+  const missingCode = await callMfaQrApprove({
+    baseUrl,
+    sessionId: "missing-session-id",
+  });
+  assert.equal(missingCode.response.status, 400);
+  assert.deepEqual(missingCode.payload, {
+    success: false,
+    message: "请输入验证码或恢复码",
+  });
+
+  const invalidSession = await callMfaQrApprove({
+    baseUrl,
+    sessionId: "missing-session-id",
+    totpCode: generateTotpCode({ secret: user.secret }),
+  });
+  assert.equal(invalidSession.response.status, 410);
+  assert.deepEqual(invalidSession.payload, {
+    success: false,
+    message: "二维码会话已失效，请刷新二维码后重试",
+    error: {
+      code: "AUTH_MFA_QR_SESSION_EXPIRED",
+      message: "二维码会话已失效，请刷新二维码后重试",
+    },
+  });
+
+  const invalidCodeSession = await callMfaQrSession({
+    baseUrl,
+    mfaChallengeToken: challenged.payload.data.mfaChallengeToken,
+  });
+  const invalidCodeSessionId = invalidCodeSession.payload.data.sessionId;
+  sessionIds.add(invalidCodeSessionId);
+  const invalidCode = await callMfaQrApprove({
+    baseUrl,
+    sessionId: invalidCodeSessionId,
+    totpCode: "000000",
+  });
+  assert.equal(invalidCode.response.status, 401);
+  assert.deepEqual(invalidCode.payload, {
+    success: false,
+    message: "双重验证失败，请重试",
+    error: {
+      code: "AUTH_MFA_INVALID_CODE",
+      message: "双重验证失败，请重试",
+    },
+  });
+
+  const expiredSession = await callMfaQrSession({
+    baseUrl,
+    mfaChallengeToken: challenged.payload.data.mfaChallengeToken,
+  });
+  const expiredSessionId = expiredSession.payload.data.sessionId;
+  sessionIds.add(expiredSessionId);
+  const session = getMfaQrSession(expiredSessionId);
+  saveMfaQrSession({
+    ...session,
+    expiresAtMs: Date.now() - 1000,
+  });
+  const expired = await callMfaQrApprove({
+    baseUrl,
+    sessionId: expiredSessionId,
+    totpCode: generateTotpCode({ secret: user.secret }),
+  });
+  assert.equal(expired.response.status, 410);
+  assert.deepEqual(expired.payload, {
+    success: false,
+    message: "二维码会话已失效，请刷新二维码后重试",
+    error: {
+      code: "AUTH_MFA_QR_SESSION_EXPIRED",
+      message: "二维码会话已失效，请刷新二维码后重试",
+    },
+  });
+});
+
+test("MFA QR poll preserves invalid and expired session failures", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_mfa_qr_poll_${suffix}`,
+    username: `route_mfa_qr_poll_${suffix}`,
+    password: "RouteMfaQrPoll123!Aa",
+    secret: "JBSWY3DPEHPK3PXP",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    password: user.password,
+    mfaEnabled: true,
+    mfaSecret: user.secret,
+  });
+
+  const server = await createAuthServer();
+  const sessionIds = new Set();
+  t.after(async () => {
+    for (const sessionId of sessionIds) {
+      deleteMfaQrSession(sessionId);
+    }
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+
+  const invalidSession = await callMfaQrPoll({
+    baseUrl,
+    sessionId: "missing-session-id",
+  });
+  assert.equal(invalidSession.response.status, 410);
+  assert.deepEqual(invalidSession.payload, {
+    success: false,
+    message: "二维码会话已失效，请刷新二维码后重试",
+    error: {
+      code: "AUTH_MFA_QR_SESSION_EXPIRED",
+      message: "二维码会话已失效，请刷新二维码后重试",
+    },
+  });
+
+  const challenged = await login({
+    baseUrl,
+    username: user.username,
+    password: user.password,
+  });
+  const qrSession = await callMfaQrSession({
+    baseUrl,
+    mfaChallengeToken: challenged.payload.data.mfaChallengeToken,
+  });
+  const sessionId = qrSession.payload.data.sessionId;
+  sessionIds.add(sessionId);
+  const session = getMfaQrSession(sessionId);
+  saveMfaQrSession({
+    ...session,
+    expiresAtMs: Date.now() - 1000,
+  });
+
+  const expired = await callMfaQrPoll({ baseUrl, sessionId });
+  assert.equal(expired.response.status, 410);
+  assert.deepEqual(expired.payload, {
+    success: false,
+    message: "二维码会话已失效，请刷新二维码后重试",
+    error: {
+      code: "AUTH_MFA_QR_SESSION_EXPIRED",
+      message: "二维码会话已失效，请刷新二维码后重试",
+    },
+  });
 });
 
 test("POST /auth/password-reset preserves generic response while consuming valid reset code", async (t) => {
