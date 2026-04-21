@@ -27,7 +27,7 @@ if rg -n "ENABLE_LEGACY_FLASK=1|ALLOW_LEGACY_FLASK_PUBLIC_BIND=1|ENABLE_LEGACY_F
 fi
 
 echo "[guard] checking docker build context excludes legacy server..."
-if ! rg -n "^server/$" .dockerignore >/dev/null 2>&1; then
+if ! grep -qx "server/" .dockerignore; then
   echo "[guard] .dockerignore must exclude server/ from docker build context."
   exit 1
 fi
