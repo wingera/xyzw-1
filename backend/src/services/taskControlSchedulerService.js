@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import WebSocket from "ws";
-import { randomId, nowIso } from "../db/sql.js";
+import { nowIso } from "../db/sql.js";
 import { taskControlRepository } from "../repositories/taskControlRepository.js";
 import { userRepository } from "../repositories/userRepository.js";
 import { userPreferenceRepository } from "../repositories/userPreferenceRepository.js";
@@ -10,7 +10,6 @@ import {
   AUTHUSER_RETRY_COUNT,
   AUTHUSER_TIMEOUT_MS,
   CHECK_INTERVAL_MS,
-  CRON_CATCHUP_MAX_MINUTES,
   DEFAULT_TIMEOUT_MS,
   EMPTY_PRIORITY,
   extractRoleIdFromTokenText,
@@ -20,12 +19,10 @@ import {
   isRetryableNetworkError,
   maskTokenIdForLog,
   MAX_AUTO_TASKS_PER_USER_PER_TICK,
-  MAX_TOKEN_EXECUTION_QUEUE_LENGTH,
   minuteKey,
   parseTaskRows,
   parseTokenString,
   QUIET_WINDOW_PREF_KEY,
-  sanitizeTaskControlLogMessage,
   SERVER_ERROR_CODE_MAP,
   sleep,
   SUPPORTED_TASK_IDS,
@@ -40,8 +37,14 @@ import {
   WS_CONNECT_TIMEOUT_MS,
   sanitizeTaskControlWsUrl,
 } from "./taskControlScheduler/taskControlSchedulerHelpers.js";
+import {
+  findDueCronMinuteKey,
+  formatQuietWindowReason,
+  getQuietWindowReason,
+} from "./taskControlScheduler/schedulerTiming.js";
+import { appendTaskControlSystemLog } from "./taskControlScheduler/systemLog.js";
+import { tokenExecutionQueue } from "./taskControlScheduler/tokenExecutionQueue.js";
 import { g_utils } from "../../../shared/bonProtocol.js";
-import { matchesCronExpression as matchesCronExpressionShared } from "../../../shared/batch/cronUtils.js";
 import {
   normalizeCars,
   canClaim,
@@ -54,8 +57,6 @@ const minuteRunGuard = new Map();
 let schedulerTimer = null;
 let schedulerRunning = false;
 let lastSchedulerTickAt = Date.now();
-let tokenExecutionChain = Promise.resolve();
-let tokenExecutionQueueLength = 0;
 const wsConnectFailureMap = new Map();
 
 const decodeAuthPayloadToToken = async (binBuffer) => {
@@ -265,68 +266,12 @@ export const resolveTokenActivationForExecution = async ({
   };
 };
 
-const matchesCronExpression = (cronExpr, now = new Date()) => {
-  try {
-    return matchesCronExpressionShared(cronExpr, now);
-  } catch {
-    return false;
-  }
-};
-
-const findDueCronMinuteKey = (row, nowTs, previousTickTs) => {
-  const fallbackStart = nowTs - 60 * 1000;
-  const safePreviousTs =
-    Number.isFinite(previousTickTs) && previousTickTs > 0 ? previousTickTs : fallbackStart;
-  const lookbackStartTs = Math.max(
-    nowTs - CRON_CATCHUP_MAX_MINUTES * 60 * 1000,
-    safePreviousTs,
-  );
-  const probe = new Date(lookbackStartTs);
-  probe.setSeconds(0, 0);
-  const end = new Date(nowTs);
-  end.setSeconds(0, 0);
-  let dueMinute = "";
-  while (probe.getTime() <= end.getTime()) {
-    if (matchesCronExpression(row.cronExpr, probe)) {
-      const key = minuteKey(probe);
-      if (key !== row.lastAutoMinuteKey) {
-        dueMinute = key;
-      }
-    }
-    probe.setMinutes(probe.getMinutes() + 1);
-  }
-  return dueMinute;
-};
-
 const isCarTaskActivityOpen = (date = new Date()) => {
   const day = date.getDay();
   const hour = date.getHours();
   return day >= 1 && day <= 3 && hour >= 6;
 };
 
-const getMinutesOfDay = (date) => date.getHours() * 60 + date.getMinutes();
-const isInUserQuietWindow = (date = new Date()) => {
-  const day = date.getDay();
-  const minute = getMinutesOfDay(date);
-  if (day === 6) return minute >= 19 * 60 + 50 && minute < 21 * 60 + 10;
-  if (day === 0) return minute >= 19 * 60 + 50 && minute < 20 * 60 + 40;
-  return false;
-};
-const isInFridayNoRunWindow = (date = new Date()) => {
-  const day = date.getDay();
-  const minute = getMinutesOfDay(date);
-  return day === 5 && minute >= 4 * 60 + 50 && minute < 7 * 60;
-};
-const getQuietWindowReason = (date = new Date(), userQuietEnabled = false) => {
-  if (isInFridayNoRunWindow(date)) return "friday_0450_0700";
-  if (userQuietEnabled && isInUserQuietWindow(date)) return "user_quiet_window";
-  return "";
-};
-const formatQuietWindowReason = (reason) => {
-  if (reason === "friday_0450_0700") return "周五 04:50-07:00 禁跑窗口";
-  if (reason === "user_quiet_window") return "静默时段";
-  return "静默时段";
-};
 const isQuietWindowEnabledForUser = (userId) => {
   try {
     const pref = userPreferenceRepository.findByUserAndKey({
@@ -527,21 +472,7 @@ const getTodayBossId = () => {
   return DAY_BOSS_MAP[dayOfWeek];
 };
 
-const appendSystemLog = ({ userId, taskId, taskName, status, message }) => {
-  const normalized = sanitizeTaskControlLogMessage(message).trim();
-  const taggedMessage = normalized.startsWith("[backend]")
-    ? normalized
-    : `[backend] ${normalized}`;
-  taskControlRepository.createLog({
-    id: randomId("tc_log"),
-    userId,
-    taskId: taskId || null,
-    taskName: String(taskName || "任务控制").slice(0, 64),
-    status: status || "info",
-    message: taggedMessage.slice(0, 2000),
-    createdAt: nowIso(),
-  });
-};
+const appendSystemLog = appendTaskControlSystemLog;
 
 const getWsCircuitKey = (url) => {
   try {
@@ -572,36 +503,7 @@ const clearWsConnectFailure = (url) => {
   wsConnectFailureMap.delete(getWsCircuitKey(url));
 };
 
-const enqueueTokenExecution = ({ job, onQueued, onStarted }) => {
-  if (tokenExecutionQueueLength >= MAX_TOKEN_EXECUTION_QUEUE_LENGTH) {
-    throw new Error(
-      `执行队列已满（上限 ${MAX_TOKEN_EXECUTION_QUEUE_LENGTH}），请稍后重试`,
-    );
-  }
-  const ahead = tokenExecutionQueueLength;
-  tokenExecutionQueueLength += 1;
-  if (typeof onQueued === "function") {
-    onQueued(ahead);
-  }
-  const previous = tokenExecutionChain;
-  const current = (async () => {
-    try {
-      await previous;
-    } catch {
-      // keep queue moving even if previous token execution failed
-    }
-    if (typeof onStarted === "function") {
-      onStarted(ahead);
-    }
-    return job();
-  })();
-  tokenExecutionChain = current
-    .catch(() => undefined)
-    .finally(() => {
-      tokenExecutionQueueLength = Math.max(0, tokenExecutionQueueLength - 1);
-    });
-  return current;
-};
+const enqueueTokenExecution = (payload) => tokenExecutionQueue.enqueue(payload);
 
 const connectWs = async (token, wsUrl) => {
   const url =
