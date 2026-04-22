@@ -1,8 +1,12 @@
 import {
+  cleanupExpiredMfaQrSessions,
+  deleteMfaQrSession,
   getMfaChallengeUser,
+  getMfaQrSession,
   issueMfaChallengeToken,
   issueMfaResetLinkToken as issueMfaResetLinkTokenRaw,
   parseMfaResetLinkToken,
+  saveMfaQrSession,
   verifyMfaCredentials,
 } from "./mfaChallenge.js";
 import {
@@ -260,3 +264,139 @@ export const disableUserMfa = ({ userId }) => {
     updatedAt,
   };
 };
+
+const mfaQrSessionError = (message) => ({
+  ok: false,
+  status: 410,
+  code: "AUTH_MFA_QR_SESSION_EXPIRED",
+  message,
+});
+
+const resolveMfaQrSession = (sessionId) => {
+  cleanupExpiredMfaQrSessions();
+  const normalizedSessionId = String(sessionId || "").trim();
+  const session = getMfaQrSession(normalizedSessionId);
+  if (!session) {
+    return mfaQrSessionError("二维码会话已失效，请刷新二维码后重试");
+  }
+  if (session.consumedAtMs) {
+    deleteMfaQrSession(normalizedSessionId);
+    return mfaQrSessionError("二维码会话已失效，请刷新二维码后重试");
+  }
+  if (Date.now() > Number(session.expiresAtMs || 0)) {
+    deleteMfaQrSession(normalizedSessionId);
+    return mfaQrSessionError("二维码会话已过期，请刷新二维码后重试");
+  }
+
+  return {
+    ok: true,
+    sessionId: normalizedSessionId,
+    session,
+  };
+};
+
+export const resolveQrApprovalRequest = ({
+  sessionId,
+  totpCode = "",
+  recoveryCode = "",
+}) => {
+  const normalizedTotpCode = String(totpCode || "").trim();
+  const normalizedRecoveryCode = String(recoveryCode || "").trim();
+  if (!normalizedTotpCode && !normalizedRecoveryCode) {
+    return {
+      ok: false,
+      status: 400,
+      message: "请输入验证码或恢复码",
+    };
+  }
+
+  const sessionCheck = resolveMfaQrSession(sessionId);
+  if (!sessionCheck.ok) {
+    return sessionCheck;
+  }
+
+  const challengeCheck = getMfaChallengeUser(sessionCheck.session.mfaChallengeToken);
+  if (!challengeCheck.ok) {
+    deleteMfaQrSession(sessionCheck.sessionId);
+    return challengeCheck;
+  }
+
+  const credentialsCheck = verifyMfaCredentials({
+    user: challengeCheck.user,
+    secret: challengeCheck.secret,
+    totpCode: normalizedTotpCode,
+    recoveryCode: normalizedRecoveryCode,
+  });
+
+  if (!credentialsCheck.ok) {
+    return {
+      ok: false,
+      status: 401,
+      code: "AUTH_MFA_INVALID_CODE",
+      message: "双重验证失败，请重试",
+      user: challengeCheck.user,
+      failureReason: "mfa_qr_verify_failed",
+    };
+  }
+
+  return {
+    ok: true,
+    sessionId: sessionCheck.sessionId,
+    session: sessionCheck.session,
+    user: challengeCheck.user,
+  };
+};
+
+export const approveMfaQrSession = ({ session }) => {
+  const nextSession = {
+    ...session,
+    approvedAtMs: Date.now(),
+  };
+  saveMfaQrSession(nextSession);
+  return nextSession;
+};
+
+export const getMfaQrPollState = ({ sessionId }) => {
+  const sessionCheck = resolveMfaQrSession(sessionId);
+  if (!sessionCheck.ok) {
+    return sessionCheck;
+  }
+
+  if (!sessionCheck.session.approvedAtMs) {
+    return {
+      ok: true,
+      status: "pending",
+      sessionId: sessionCheck.sessionId,
+      session: sessionCheck.session,
+    };
+  }
+
+  const challengeCheck = getMfaChallengeUser(sessionCheck.session.mfaChallengeToken);
+  if (!challengeCheck.ok) {
+    deleteMfaQrSession(sessionCheck.sessionId);
+    return challengeCheck;
+  }
+
+  const consumedSession = {
+    ...sessionCheck.session,
+    consumedAtMs: Date.now(),
+  };
+  saveMfaQrSession(consumedSession);
+  deleteMfaQrSession(sessionCheck.sessionId);
+  return {
+    ok: true,
+    status: "approved",
+    sessionId: sessionCheck.sessionId,
+    session: consumedSession,
+    user: challengeCheck.user,
+    rememberMe: Boolean(challengeCheck.payload?.rememberMe),
+    loginMethod: String(challengeCheck.payload?.loginMethod || "password+mfa"),
+  };
+};
+
+export const buildMfaQrPollResponse = ({ status }) => ({
+  success: true,
+  data: {
+    status,
+  },
+});

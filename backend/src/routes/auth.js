@@ -76,21 +76,21 @@ import {
 import {
   cleanupExpiredMfaQrSessions,
   createMfaQrSession,
-  deleteMfaQrSession,
   getMfaChallengeUser,
-  getMfaQrSession,
-  saveMfaQrSession,
-  verifyMfaCredentials,
 } from "../modules/auth/mfaChallenge.js";
 import {
   applyMfaResetByLink,
+  approveMfaQrSession,
   buildMfaSetupResponse,
+  buildMfaQrPollResponse,
   createMfaSetup,
   disableUserMfa,
   enableUserMfa,
+  getMfaQrPollState,
   issueLoginMfaChallenge,
   issueMfaResetLinkToken,
   MFA_RESET_LINK_TTL_SECONDS,
+  resolveQrApprovalRequest,
   resolveMfaLoginChallenge,
   resolveMfaResetLinkRequest,
   verifyMfaAccountPassword,
@@ -1087,57 +1087,40 @@ router.post(
   mfaVerifyLimiter,
   validateRequest({ body: mfaQrApproveBodySchema }),
   (req, res) => {
-    cleanupExpiredMfaQrSessions();
     const sessionId = String(req.body?.sessionId || "").trim();
     const totpCode = String(req.body?.totpCode || "").trim();
     const recoveryCode = String(req.body?.recoveryCode || "").trim();
-    if (!totpCode && !recoveryCode) {
-      return res.status(400).json({ success: false, message: "请输入验证码或恢复码" });
+    const approval = resolveQrApprovalRequest({
+      sessionId,
+      totpCode,
+      recoveryCode,
+    });
+
+    if (!approval.ok && approval.failureReason) {
+      recordSecurityEvent({
+        userId: approval.user.id,
+        eventType: "login_failed",
+        detail: { reason: approval.failureReason },
+        ...reqMeta(req),
+      });
     }
 
-    const session = getMfaQrSession(sessionId);
-    if (!session) {
-      return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已失效，请刷新二维码后重试");
-    }
-    if (session.consumedAtMs) {
-      deleteMfaQrSession(sessionId);
-      return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已失效，请刷新二维码后重试");
-    }
-    if (Date.now() > Number(session.expiresAtMs || 0)) {
-      deleteMfaQrSession(sessionId);
-      return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已过期，请刷新二维码后重试");
-    }
-
-    const challengeCheck = getMfaChallengeUser(session.mfaChallengeToken);
-    if (!challengeCheck.ok) {
-      deleteMfaQrSession(sessionId);
+    if (!approval.ok) {
+      if (!approval.code) {
+        return res.status(approval.status).json({
+          success: false,
+          message: approval.message,
+        });
+      }
       return errorResponse(
         res,
-        challengeCheck.status,
-        challengeCheck.code,
-        challengeCheck.message,
+        approval.status,
+        approval.code,
+        approval.message,
       );
     }
 
-    const passed = verifyMfaCredentials({
-      user: challengeCheck.user,
-      secret: challengeCheck.secret,
-      totpCode,
-      recoveryCode,
-    }).ok;
-
-    if (!passed) {
-      recordSecurityEvent({
-        userId: challengeCheck.user.id,
-        eventType: "login_failed",
-        detail: { reason: "mfa_qr_verify_failed" },
-        ...reqMeta(req),
-      });
-      return errorResponse(res, 401, "AUTH_MFA_INVALID_CODE", "双重验证失败，请重试");
-    }
-
-    session.approvedAtMs = Date.now();
-    saveMfaQrSession(session);
+    approveMfaQrSession({ session: approval.session });
     return res.json({ success: true, message: "扫码验证通过，请返回登录页面" });
   },
 );
@@ -1147,49 +1130,27 @@ router.post(
   mfaQrPollLimiter,
   validateRequest({ body: mfaQrSessionIdBodySchema }),
   (req, res) => {
-    cleanupExpiredMfaQrSessions();
     const sessionId = String(req.body?.sessionId || "").trim();
-    const session = getMfaQrSession(sessionId);
-    if (!session) {
-      return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已失效，请刷新二维码后重试");
-    }
-    if (session.consumedAtMs) {
-      deleteMfaQrSession(sessionId);
-      return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已失效，请刷新二维码后重试");
-    }
-    if (Date.now() > Number(session.expiresAtMs || 0)) {
-      deleteMfaQrSession(sessionId);
-      return errorResponse(res, 410, "AUTH_MFA_QR_SESSION_EXPIRED", "二维码会话已过期，请刷新二维码后重试");
-    }
-    if (!session.approvedAtMs) {
-      return res.json({
-        success: true,
-        data: {
-          status: "pending",
-        },
-      });
-    }
-
-    const challengeCheck = getMfaChallengeUser(session.mfaChallengeToken);
-    if (!challengeCheck.ok) {
-      deleteMfaQrSession(sessionId);
+    const pollState = getMfaQrPollState({ sessionId });
+    if (!pollState.ok) {
       return errorResponse(
         res,
-        challengeCheck.status,
-        challengeCheck.code,
-        challengeCheck.message,
+        pollState.status,
+        pollState.code,
+        pollState.message,
       );
     }
 
-    session.consumedAtMs = Date.now();
-    saveMfaQrSession(session);
-    deleteMfaQrSession(sessionId);
+    if (pollState.status === "pending") {
+      return res.json(buildMfaQrPollResponse(pollState));
+    }
+
     return finalizeLogin({
       req,
       res,
-      user: challengeCheck.user,
-      rememberMe: Boolean(challengeCheck.payload?.rememberMe),
-      loginMethod: String(challengeCheck.payload?.loginMethod || "password+mfa"),
+      user: pollState.user,
+      rememberMe: pollState.rememberMe,
+      loginMethod: pollState.loginMethod,
     });
   },
 );
