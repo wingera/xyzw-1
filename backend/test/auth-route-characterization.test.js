@@ -1049,6 +1049,74 @@ test("MFA disable preserves password and code checks before disabling MFA", asyn
   assert.equal(Number(stored.tokenVersion), 0);
 });
 
+test("MFA disable preserves recovery code verification path", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const user = {
+    id: `route_mfa_disable_recovery_${suffix}`,
+    username: `route_mfa_disable_recovery_${suffix}`,
+    credential: "RouteMfaRecoveryDisable123!Aa",
+  };
+  seedUser({
+    userId: user.id,
+    username: user.username,
+    credential: user.credential,
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    cleanupUser(user.id);
+  });
+  const baseUrl = makeBaseUrl(server);
+  const loginResult = await login({
+    baseUrl,
+    username: user.username,
+    credential: user.credential,
+  });
+  const cookieHeader = toCookieHeader(loginResult.cookies);
+  const setupResult = await callMfaSetup({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+  });
+  const secret = setupResult.payload.data.secret;
+  const enabled = await callMfaEnable({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+    secret,
+    totpCode: generateTotpCode({ secret }),
+  });
+  assert.equal(enabled.response.status, 200);
+  const [recoveryCode] = enabled.payload.data.recoveryCodes;
+
+  const disabled = await callMfaDisable({
+    baseUrl,
+    cookieHeader,
+    password: user.credential,
+    recoveryCode,
+  });
+  assert.equal(disabled.response.status, 200);
+  assert.deepEqual(disabled.payload, {
+    success: true,
+    message: "双重验证已关闭",
+  });
+
+  const stored = query(
+    `SELECT mfa_enabled as mfaEnabled,
+            mfa_totp_secret_enc as mfaTotpSecretEnc,
+            mfa_recovery_codes_hash as mfaRecoveryCodesHash,
+            token_version as tokenVersion
+     FROM users WHERE id = $id`,
+    { $id: user.id },
+  )[0];
+  assert.equal(Number(stored.mfaEnabled), 0);
+  assert.equal(stored.mfaTotpSecretEnc, null);
+  assert.equal(stored.mfaRecoveryCodesHash, null);
+  assert.equal(Number(stored.tokenVersion), 0);
+});
+
 test("MFA login preserves challenge response before session issuance and verified login response after TOTP", async (t) => {
   await initDatabase();
   const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;

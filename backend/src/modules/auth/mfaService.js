@@ -5,7 +5,7 @@ import {
   parseMfaResetLinkToken,
   verifyMfaCredentials,
 } from "./mfaChallenge.js";
-import { verifyPassword } from "../../lib/crypto.js";
+import { verifyAuthPassword } from "./authService.js";
 import { nowIso } from "../../db/sql.js";
 import { refreshTokenRepository } from "../../repositories/refreshTokenRepository.js";
 import { userRepository } from "../../repositories/userRepository.js";
@@ -158,14 +158,15 @@ const MFA_CREDENTIAL_HASH_FIELD = ["password", "Hash"].join("");
 
 export const verifyMfaAccountPassword = ({ userId, credential }) => {
   const userPwd = userRepository.findPasswordById(userId);
-  return Boolean(
-    userPwd
-      && verifyPassword(
-        String(credential || ""),
-        userPwd[MFA_CREDENTIAL_SALT_FIELD],
-        userPwd[MFA_CREDENTIAL_HASH_FIELD],
-      ),
-  );
+  return verifyAuthPassword({
+    user: userPwd
+      ? {
+        [MFA_CREDENTIAL_SALT_FIELD]: userPwd[MFA_CREDENTIAL_SALT_FIELD],
+        [MFA_CREDENTIAL_HASH_FIELD]: userPwd[MFA_CREDENTIAL_HASH_FIELD],
+      }
+      : null,
+    credential: String(credential || ""),
+  }).ok;
 };
 
 export const createMfaSetup = ({ username }) =>
@@ -199,6 +200,41 @@ export const enableUserMfa = ({ userId, username, secret }) => {
   };
 };
 
+const verifyMfaDisableTotpCredential = ({ secret, totpCode }) => ({
+  method: "totp",
+  ok: Boolean(secret) && verifyTotpCode({
+    secret,
+    code: String(totpCode || "").trim(),
+  }),
+});
+
+const verifyMfaDisableRecoveryCredential = ({ user, recoveryCode }) => {
+  const recoveryResult = verifyAndConsumeRecoveryCode({
+    inputCode: String(recoveryCode || "").trim(),
+    recoveryCodeHashesJson: user?.mfaRecoveryCodesHash || "[]",
+  });
+  return {
+    method: "recovery",
+    ok: recoveryResult.ok,
+  };
+};
+
+const resolveMfaDisableCredentialVerification = ({
+  user,
+  secret,
+  totpCode,
+  recoveryCode,
+}) => {
+  const verifications = [
+    verifyMfaDisableTotpCredential({ secret, totpCode }),
+    verifyMfaDisableRecoveryCredential({ user, recoveryCode }),
+  ];
+  return verifications.find((verification) => verification.ok) || {
+    method: "none",
+    ok: false,
+  };
+};
+
 export const verifyMfaDisableRequest = ({
   userId,
   totpCode = "",
@@ -206,29 +242,15 @@ export const verifyMfaDisableRequest = ({
 }) => {
   const user = userRepository.findById(userId);
   const secret = decryptMfaSecret(user?.mfaTotpSecretEnc || "");
-  const normalizedTotpCode = String(totpCode || "").trim();
-  const normalizedRecoveryCode = String(recoveryCode || "").trim();
-
-  if (normalizedTotpCode && secret) {
-    return {
-      ok: verifyTotpCode({ secret, code: normalizedTotpCode }),
-      user,
-    };
-  }
-
-  if (normalizedRecoveryCode) {
-    const recoveryResult = verifyAndConsumeRecoveryCode({
-      inputCode: normalizedRecoveryCode,
-      recoveryCodeHashesJson: user?.mfaRecoveryCodesHash || "[]",
-    });
-    return {
-      ok: recoveryResult.ok,
-      user,
-    };
-  }
+  const verification = resolveMfaDisableCredentialVerification({
+    user,
+    secret,
+    totpCode,
+    recoveryCode,
+  });
 
   return {
-    ok: false,
+    ok: verification.ok,
     user,
   };
 };
