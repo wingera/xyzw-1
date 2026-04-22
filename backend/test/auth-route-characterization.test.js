@@ -186,6 +186,64 @@ const callRefresh = async ({ baseUrl, cookieHeader }) => {
   };
 };
 
+const createPasswordResetCode = ({
+  id,
+  userId,
+  code = "RSTT1234",
+  expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+  isActive = true,
+  usedAt = null,
+}) => {
+  userRepository.createPasswordResetCode({
+    id,
+    userId,
+    code,
+    createdBy: userId,
+    expiresAt,
+    createdAt: nowIso(),
+  });
+  if (!isActive || usedAt) {
+    run(
+      `UPDATE password_reset_codes
+       SET is_active = $isActive, used_at = $usedAt
+       WHERE id = $id`,
+      {
+        $id: id,
+        $isActive: isActive ? 1 : 0,
+        $usedAt: usedAt,
+      },
+    );
+  }
+};
+
+const callPasswordReset = async ({
+  baseUrl,
+  identity,
+  shortCode = "RSTT1234",
+  newPassword,
+  cookieHeader = "",
+}) => {
+  const headers = {
+    "content-type": "application/json",
+    "user-agent": "auth-route-characterization",
+  };
+  if (cookieHeader) headers.cookie = cookieHeader;
+  const response = await fetch(`${baseUrl}/api/v1/auth/password-reset`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      identity,
+      shortCode,
+      newPassword,
+    }),
+  });
+  return {
+    response,
+    payload: await response.json(),
+    cookies: response.headers.getSetCookie(),
+  };
+};
+
 test("POST /auth/login preserves success response shape and auth cookies", async (t) => {
   await initDatabase();
   const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -694,13 +752,9 @@ test("POST /auth/password-reset preserves generic response while consuming valid
     username: user.username,
     credential: user.credential,
   });
-  userRepository.createPasswordResetCode({
+  createPasswordResetCode({
     id: `route_reset_code_${suffix}`,
     userId: user.id,
-    code: "RSTT1234",
-    createdBy: user.id,
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-    createdAt: nowIso(),
   });
 
   const server = await createAuthServer();
@@ -717,26 +771,19 @@ test("POST /auth/password-reset preserves generic response while consuming valid
   });
   assert.equal(loginResult.response.status, 200);
 
-  const response = await fetch(`${baseUrl}/api/v1/auth/password-reset`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      cookie: toCookieHeader(loginResult.cookies),
-      "user-agent": "auth-route-characterization",
-    },
-    body: JSON.stringify({
-      identity: user.username,
-      shortCode: "RSTT1234",
-      newPassword: user.nextCredential,
-    }),
+  const response = await callPasswordReset({
+    baseUrl,
+    identity: user.username,
+    newPassword: user.nextCredential,
+    cookieHeader: toCookieHeader(loginResult.cookies),
   });
 
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
+  assert.equal(response.response.status, 200);
+  assert.deepEqual(response.payload, {
     success: true,
     message: PASSWORD_RESET_GENERIC_MESSAGE,
   });
-  const cookies = response.headers.getSetCookie();
+  const cookies = response.cookies;
   assertClearedCookie(cookies, env.accessCookieName);
   assertClearedCookie(cookies, env.refreshCookieName);
   assertClearedCookie(cookies, env.csrfCookieName);
@@ -754,24 +801,141 @@ test("POST /auth/password-reset preserves generic response while consuming valid
     { $userId: user.id },
   );
   assert.equal(activeCodes.length, 0);
+  const activeRefreshTokens = query(
+    `SELECT id FROM refresh_tokens WHERE user_id = $userId AND revoked_at IS NULL`,
+    { $userId: user.id },
+  );
+  assert.equal(activeRefreshTokens.length, 0);
 
-  const missingUserResponse = await fetch(`${baseUrl}/api/v1/auth/password-reset`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "user-agent": "auth-route-characterization",
-    },
-    body: JSON.stringify({
-      identity: `missing_${suffix}`,
-      shortCode: "RSTT1234",
-      newPassword: "AnotherReset123!Aa",
-    }),
+  const missingUserResponse = await callPasswordReset({
+    baseUrl,
+    identity: `missing_${suffix}`,
+    newPassword: "AnotherReset123!Aa",
   });
-  assert.equal(missingUserResponse.status, 200);
-  assert.deepEqual(await missingUserResponse.json(), {
+  assert.equal(missingUserResponse.response.status, 200);
+  assert.deepEqual(missingUserResponse.payload, {
     success: true,
     message: PASSWORD_RESET_GENERIC_MESSAGE,
   });
+});
+
+test("POST /auth/password-reset preserves generic response for invalid, inactive, used, and expired codes", async (t) => {
+  await initDatabase();
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const baseUser = {
+    id: `route_reset_invalid_${suffix}`,
+    username: `route_reset_invalid_${suffix}`,
+    credential: "RouteResetInvalid123!Aa",
+  };
+  const inactiveUser = {
+    id: `route_reset_inactive_${suffix}`,
+    username: `route_reset_inactive_${suffix}`,
+    credential: "RouteResetInactive123!Aa",
+  };
+  const usedUser = {
+    id: `route_reset_used_${suffix}`,
+    username: `route_reset_used_${suffix}`,
+    credential: "RouteResetUsed123!Aa",
+  };
+  const expiredUser = {
+    id: `route_reset_expired_${suffix}`,
+    username: `route_reset_expired_${suffix}`,
+    credential: "RouteResetExpired123!Aa",
+  };
+
+  [baseUser, inactiveUser, usedUser, expiredUser].forEach((user) => {
+    seedUser({
+      userId: user.id,
+      username: user.username,
+      credential: user.credential,
+    });
+  });
+  createPasswordResetCode({
+    id: `route_reset_inactive_code_${suffix}`,
+    userId: inactiveUser.id,
+    code: "RSTA1234",
+    isActive: false,
+  });
+  createPasswordResetCode({
+    id: `route_reset_used_code_${suffix}`,
+    userId: usedUser.id,
+    code: "RSTB1234",
+    usedAt: nowIso(),
+  });
+  createPasswordResetCode({
+    id: `route_reset_expired_code_${suffix}`,
+    userId: expiredUser.id,
+    code: "RSTC1234",
+    expiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
+  });
+
+  const server = await createAuthServer();
+  t.after(async () => {
+    await closeServer(server);
+    [baseUser, inactiveUser, usedUser, expiredUser].forEach((user) => {
+      cleanupUser(user.id);
+    });
+  });
+  const baseUrl = makeBaseUrl(server);
+
+  const cases = [
+    {
+      user: baseUser,
+      shortCode: "WRONG123",
+      reason: "invalid code should not reveal account existence",
+    },
+    {
+      user: inactiveUser,
+      shortCode: "RSTA1234",
+      reason: "inactive code should be masked",
+    },
+    {
+      user: usedUser,
+      shortCode: "RSTB1234",
+      reason: "used code should be masked",
+    },
+    {
+      user: expiredUser,
+      shortCode: "RSTC1234",
+      reason: "expired code should be masked and deactivated",
+    },
+  ];
+
+  for (const item of cases) {
+    const before = query(
+      `SELECT password_hash as passwordHash, token_version as tokenVersion
+       FROM users WHERE id = $id`,
+      { $id: item.user.id },
+    )[0];
+    const result = await callPasswordReset({
+      baseUrl,
+      identity: item.user.username,
+      shortCode: item.shortCode,
+      newPassword: "MaskedReset123!Aa",
+    });
+
+    assert.equal(result.response.status, 200, item.reason);
+    assert.deepEqual(result.payload, {
+      success: true,
+      message: PASSWORD_RESET_GENERIC_MESSAGE,
+    });
+
+    const after = query(
+      `SELECT password_hash as passwordHash, token_version as tokenVersion
+       FROM users WHERE id = $id`,
+      { $id: item.user.id },
+    )[0];
+    assert.equal(after.passwordHash, before.passwordHash, item.reason);
+    assert.equal(Number(after.tokenVersion), Number(before.tokenVersion), item.reason);
+  }
+
+  const expiredCode = query(
+    `SELECT is_active as isActive, used_at as usedAt
+     FROM password_reset_codes WHERE user_id = $userId`,
+    { $userId: expiredUser.id },
+  )[0];
+  assert.equal(Number(expiredCode.isActive), 0);
+  assert.equal(expiredCode.usedAt, null);
 });
 
 test("MFA reset link compatibility export preserves reset-by-link behavior", async (t) => {

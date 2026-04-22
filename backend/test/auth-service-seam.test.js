@@ -32,7 +32,12 @@ test("auth service seam exposes thin wrappers for future route extraction", () =
   assert.equal(typeof mfaService.MFA_RESET_LINK_TTL_SECONDS, "number");
 
   assert.equal(typeof passwordResetService.findPasswordResetUser, "function");
+  assert.equal(typeof passwordResetService.findPasswordResetSubject, "function");
   assert.equal(typeof passwordResetService.findPasswordResetCode, "function");
+  assert.equal(typeof passwordResetService.assertPasswordResetCodeUsable, "function");
+  assert.equal(typeof passwordResetService.consumePasswordResetCode, "function");
+  assert.equal(typeof passwordResetService.applyPasswordReset, "function");
+  assert.equal(typeof passwordResetService.revokeUserRefreshSessionsForPasswordReset, "function");
   assert.equal(typeof passwordResetService.deactivatePasswordResetCode, "function");
 
   assert.equal(typeof wechatAuthService.isWechatAuthConfigured, "function");
