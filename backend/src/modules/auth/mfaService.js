@@ -5,7 +5,10 @@ import {
   parseMfaResetLinkToken,
   verifyMfaCredentials,
 } from "./mfaChallenge.js";
-import { verifyAuthPassword } from "./authService.js";
+import {
+  findAuthUserByIdentity,
+  verifyAuthPassword,
+} from "./authService.js";
 import { nowIso } from "../../db/sql.js";
 import { refreshTokenRepository } from "../../repositories/refreshTokenRepository.js";
 import { userRepository } from "../../repositories/userRepository.js";
@@ -153,10 +156,10 @@ export const applyMfaResetByLink = ({ user }) => {
   };
 };
 
-export const verifyMfaAccountPassword = ({ userId, credential }) => {
-  const userPwd = userRepository.findPasswordById(userId);
+export const verifyMfaAccountPassword = ({ identity, credential }) => {
+  const user = findAuthUserByIdentity(identity);
   return verifyAuthPassword({
-    user: userPwd,
+    user,
     credential: String(credential || ""),
   }).ok;
 };

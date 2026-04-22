@@ -1201,7 +1201,7 @@ router.post(
   validateRequest({ body: mfaSetupBodySchema }),
   (req, res) => {
     const credential = String(req.body?.[CREDENTIAL_BODY_FIELD] || "");
-    if (!verifyMfaAccountPassword({ userId: req.auth.user.id, credential })) {
+    if (!verifyMfaAccountPassword({ identity: req.auth.user.username, credential })) {
       return res.status(400).json({ success: false, message: "当前密码错误" });
     }
 
@@ -1222,7 +1222,7 @@ router.post(
   validateRequest({ body: mfaEnableBodySchema }),
   (req, res) => {
     const credential = String(req.body?.[CREDENTIAL_BODY_FIELD] || "");
-    if (!verifyMfaAccountPassword({ userId: req.auth.user.id, credential })) {
+    if (!verifyMfaAccountPassword({ identity: req.auth.user.username, credential })) {
       return res.status(400).json({ success: false, message: "当前密码错误" });
     }
 
@@ -1261,7 +1261,7 @@ router.post(
   validateRequest({ body: mfaDisableBodySchema }),
   (req, res) => {
     const credential = String(req.body?.[CREDENTIAL_BODY_FIELD] || "");
-    if (!verifyMfaAccountPassword({ userId: req.auth.user.id, credential })) {
+    if (!verifyMfaAccountPassword({ identity: req.auth.user.username, credential })) {
       return res.status(400).json({ success: false, message: "当前密码错误" });
     }
 
