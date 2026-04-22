@@ -153,18 +153,10 @@ export const applyMfaResetByLink = ({ user }) => {
   };
 };
 
-const MFA_CREDENTIAL_SALT_FIELD = ["password", "Salt"].join("");
-const MFA_CREDENTIAL_HASH_FIELD = ["password", "Hash"].join("");
-
 export const verifyMfaAccountPassword = ({ userId, credential }) => {
   const userPwd = userRepository.findPasswordById(userId);
   return verifyAuthPassword({
-    user: userPwd
-      ? {
-        [MFA_CREDENTIAL_SALT_FIELD]: userPwd[MFA_CREDENTIAL_SALT_FIELD],
-        [MFA_CREDENTIAL_HASH_FIELD]: userPwd[MFA_CREDENTIAL_HASH_FIELD],
-      }
-      : null,
+    user: userPwd,
     credential: String(credential || ""),
   }).ok;
 };
