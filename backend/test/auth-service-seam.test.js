@@ -15,6 +15,13 @@ test("auth service seam exposes thin wrappers for future route extraction", () =
   assert.equal(typeof authService.getAuthLoginBlockedError, "function");
 
   assert.equal(typeof sessionService.findSessionUserById, "function");
+  assert.equal(typeof sessionService.getSessionUser, "function");
+  assert.equal(typeof sessionService.findRefreshSessionByTokenHash, "function");
+  assert.equal(typeof sessionService.assertRefreshSessionUsable, "function");
+  assert.equal(typeof sessionService.assertTokenVersionCurrent, "function");
+  assert.equal(typeof sessionService.assertTrialActive, "function");
+  assert.equal(typeof sessionService.rotateRefreshSession, "function");
+  assert.equal(typeof sessionService.revokeRefreshSession, "function");
   assert.equal(typeof sessionService.isRefreshTokenVersionCurrent, "function");
   assert.equal(typeof sessionService.isSessionTrialExpired, "function");
 
