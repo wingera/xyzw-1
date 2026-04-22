@@ -4,7 +4,7 @@ import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
 import { createPassword } from "../lib/crypto.js";
 import { validatePasswordStrengthAsync } from "../lib/passwordPolicy.js";
-import { nowIso, randomId, secureId } from "../db/sql.js";
+import { nowIso, randomId } from "../db/sql.js";
 import { authRequired } from "../middleware/auth.js";
 import { createRateLimiter } from "../middleware/rateLimit.js";
 import { validateRequest } from "../middleware/validate.js";
@@ -112,9 +112,15 @@ import {
 } from "../modules/auth/passwordResetService.js";
 import { buildCsrfResponseData } from "../modules/auth/csrf.js";
 import {
-  buildWechatAuthorizeUrl,
+  buildWechatCallbackPostMessagePayload,
+  classifyWechatCallbackFlow,
+  consumeWechatAuthFlow,
+  createWechatAuthFlow,
   isWechatAuthConfigured,
+  isWechatBindingConflictError,
   loadWechatUserProfileByCode,
+  maskWechatOpenId,
+  normalizeWechatCallbackCode,
 } from "../modules/auth/wechatAuthService.js";
 
 const router = Router();
@@ -224,11 +230,6 @@ const wechatLoginStartBodySchema = z.object({
   rememberMe: z.boolean().optional().default(false),
 }).strict();
 const CREDENTIAL_BODY_FIELD = ["pass", "word"].join("");
-const WECHAT_CALLBACK_CODE_PATTERN = /^[A-Za-z0-9_-]{1,512}$/;
-const WECHAT_AUTH_FLOW_TTL_MS = 5 * 60 * 1000;
-const MAX_WECHAT_AUTH_FLOW_COUNT = 500;
-const WECHAT_AUTH_CALLBACK_SOURCE = "xyzw-wechat-auth";
-const wechatAuthFlowStore = new Map();
 
 const createAccountDisplayId = () => {
   const raw = crypto.randomBytes(8).toString("hex").toUpperCase();
@@ -242,96 +243,6 @@ const referralRegisterError = (req, res, code, message) => {
     code,
     message,
   });
-};
-
-const cleanupExpiredWechatAuthFlows = () => {
-  const now = Date.now();
-  for (const [flowId, flow] of wechatAuthFlowStore.entries()) {
-    if (!flow || Number(flow.expiresAtMs || 0) <= now) {
-      wechatAuthFlowStore.delete(flowId);
-    }
-  }
-  if (wechatAuthFlowStore.size <= MAX_WECHAT_AUTH_FLOW_COUNT) {
-    return;
-  }
-  const flows = Array.from(wechatAuthFlowStore.entries()).sort(
-    (a, b) => Number(a?.[1]?.createdAtMs || 0) - Number(b?.[1]?.createdAtMs || 0),
-  );
-  const removeCount = Math.max(0, flows.length - MAX_WECHAT_AUTH_FLOW_COUNT);
-  for (let i = 0; i < removeCount; i += 1) {
-    wechatAuthFlowStore.delete(String(flows[i]?.[0] || ""));
-  }
-};
-
-const createWechatAuthFlow = ({ intent, rememberMe = false, userId = null }) => {
-  cleanupExpiredWechatAuthFlows();
-  const createdAtMs = Date.now();
-  const flowId = secureId("wxflow");
-  wechatAuthFlowStore.set(flowId, {
-    id: flowId,
-    intent: String(intent || "").trim(),
-    rememberMe: Boolean(rememberMe),
-    userId: String(userId || "").trim() || null,
-    createdAtMs,
-    expiresAtMs: createdAtMs + WECHAT_AUTH_FLOW_TTL_MS,
-  });
-  return {
-    flowId,
-    authorizeUrl: buildWechatAuthorizeUrl({ state: flowId }),
-  };
-};
-
-const consumeWechatAuthFlow = (flowId) => {
-  cleanupExpiredWechatAuthFlows();
-  const safeFlowId = String(flowId || "").trim();
-  const flow = wechatAuthFlowStore.get(safeFlowId);
-  if (!flow) {
-    return null;
-  }
-  wechatAuthFlowStore.delete(safeFlowId);
-  return flow;
-};
-
-const normalizeWechatCallbackCode = (value) => {
-  const code = String(value || "").trim();
-  return WECHAT_CALLBACK_CODE_PATTERN.test(code) ? code : "";
-};
-
-const maskWechatOpenId = (openId) => {
-  const value = String(openId || "").trim();
-  if (!value) {
-    return "";
-  }
-  if (value.length <= 6) {
-    return `${value.slice(0, 2)}***`;
-  }
-  return `${value.slice(0, 4)}***${value.slice(-4)}`;
-};
-
-const createWechatCallbackPayload = ({
-  intent,
-  success,
-  flowId,
-  message,
-  errorCode = "",
-  mfaRequired = false,
-  mfaChallengeToken = "",
-}) => {
-  const payload = {
-    source: WECHAT_AUTH_CALLBACK_SOURCE,
-    intent: String(intent || "").trim() || "login",
-    success: Boolean(success),
-    flowId: String(flowId || "").trim(),
-    message: String(message || "").trim(),
-  };
-  if (!payload.success && errorCode) {
-    payload.errorCode = String(errorCode || "").trim();
-  }
-  if (mfaRequired) {
-    payload.mfaRequired = true;
-    payload.mfaChallengeToken = String(mfaChallengeToken || "").trim();
-  }
-  return payload;
 };
 
 const sendWechatCallbackHtml = (res, payload) => {
@@ -370,16 +281,6 @@ const sendWechatCallbackHtml = (res, payload) => {
   </script>
 </body>
 </html>`);
-};
-
-const isWechatBindingConflictError = (error) => {
-  const message = String(error?.message || "");
-  return (
-    message.includes("idx_users_wechat_open_id")
-    || message.includes("idx_users_wechat_union_id")
-    || message.includes("users.wechat_open_id")
-    || message.includes("users.wechat_union_id")
-  );
 };
 
 const finalizeLogin = ({
@@ -685,14 +586,15 @@ router.get("/wechat/callback", wechatCallbackAbuseLimiter, async (req, res) => {
   const flowId = String(req.query?.state || "").trim();
   const code = normalizeWechatCallbackCode(req.query?.code);
   const flow = consumeWechatAuthFlow(flowId);
-  const intent = String(flow?.intent || "login").trim() || "login";
+  const callbackFlow = classifyWechatCallbackFlow(flow);
+  const { intent } = callbackFlow;
   const callbackFailure = ({
     message,
     errorCode,
   }) =>
     sendWechatCallbackHtml(
       res,
-      createWechatCallbackPayload({
+      buildWechatCallbackPostMessagePayload({
         intent,
         success: false,
         flowId,
@@ -717,9 +619,9 @@ router.get("/wechat/callback", wechatCallbackAbuseLimiter, async (req, res) => {
     }
 
     if (!code) {
-      if (intent === "bind" && flow.userId) {
+      if (callbackFlow.isBind && callbackFlow.bindUserId) {
         recordSecurityEvent({
-          userId: flow.userId,
+          userId: callbackFlow.bindUserId,
           eventType: "wechat_bind_failed",
           detail: { reason: "missing_code" },
           ...reqMeta(req),
@@ -742,9 +644,9 @@ router.get("/wechat/callback", wechatCallbackAbuseLimiter, async (req, res) => {
     try {
       profile = await loadWechatUserProfileByCode(code);
     } catch (error) {
-      if (intent === "bind" && flow.userId) {
+      if (callbackFlow.isBind && callbackFlow.bindUserId) {
         recordSecurityEvent({
-          userId: flow.userId,
+          userId: callbackFlow.bindUserId,
           eventType: "wechat_bind_failed",
           detail: {
             reason: "upstream_error",
@@ -769,11 +671,11 @@ router.get("/wechat/callback", wechatCallbackAbuseLimiter, async (req, res) => {
       });
     }
 
-    if (intent === "bind") {
-      const currentUser = userRepository.findById(flow.userId);
+    if (callbackFlow.isBind) {
+      const currentUser = userRepository.findById(callbackFlow.bindUserId);
       if (!currentUser) {
         recordSecurityEvent({
-          userId: flow.userId || null,
+          userId: callbackFlow.bindUserId || null,
           eventType: "wechat_bind_failed",
           detail: { reason: "user_not_found" },
           ...reqMeta(req),
@@ -842,7 +744,7 @@ router.get("/wechat/callback", wechatCallbackAbuseLimiter, async (req, res) => {
       });
       return sendWechatCallbackHtml(
         res,
-        createWechatCallbackPayload({
+        buildWechatCallbackPostMessagePayload({
           intent: "bind",
           success: true,
           flowId,
@@ -885,7 +787,7 @@ router.get("/wechat/callback", wechatCallbackAbuseLimiter, async (req, res) => {
     if (user.mfaEnabled) {
       const mfaChallengeToken = issueLoginMfaChallenge({
         user,
-        rememberMe: Boolean(flow.rememberMe),
+        rememberMe: callbackFlow.rememberMe,
         loginMethod: "wechat+mfa",
       });
       recordSecurityEvent({
@@ -893,13 +795,13 @@ router.get("/wechat/callback", wechatCallbackAbuseLimiter, async (req, res) => {
         eventType: "wechat_login_failed",
         detail: {
           reason: "mfa_required",
-          rememberMe: Boolean(flow.rememberMe),
+          rememberMe: callbackFlow.rememberMe,
         },
         ...reqMeta(req),
       });
       return sendWechatCallbackHtml(
         res,
-        createWechatCallbackPayload({
+        buildWechatCallbackPostMessagePayload({
           intent: "login",
           success: true,
           flowId,
@@ -914,12 +816,12 @@ router.get("/wechat/callback", wechatCallbackAbuseLimiter, async (req, res) => {
       req,
       res,
       user,
-      rememberMe: Boolean(flow.rememberMe),
+      rememberMe: callbackFlow.rememberMe,
       loginMethod: "wechat",
     });
     return sendWechatCallbackHtml(
       res,
-      createWechatCallbackPayload({
+      buildWechatCallbackPostMessagePayload({
         intent: "login",
         success: true,
         flowId,
